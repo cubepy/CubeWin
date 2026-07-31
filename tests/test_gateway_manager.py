@@ -72,7 +72,7 @@ class WindowsStub:
             mac="10:20:30:40:50:60",
             description="Wireless Adapter",
         )
-        self.tun = TunAdapter(index=100, alias="UAC-Spoofer")
+        self.tun = TunAdapter(index=100, alias="CubeVPN")
         self.apply_calls = []
         self.restore_calls = []
         self.apply_error = None
@@ -838,7 +838,7 @@ def test_windows_detection_parses_generic_adapter_without_windows():
                 }
             )
 
-    adapter = WindowsGatewayBackend(Runner()).detect_lan({"UAC-Spoofer"})
+    adapter = WindowsGatewayBackend(Runner()).detect_lan({"CubeVPN"})
 
     assert adapter == LanAdapter(
         index=31,
@@ -861,15 +861,15 @@ def test_wait_for_tun_treats_missing_adapter_as_retryable():
             assert "exit 0" in script
             if self.calls == 1:
                 return ""
-            return '{"index":44,"alias":"UAC-Spoofer"}'
+            return '{"index":44,"alias":"CubeVPN"}'
 
     runner = Runner()
     tun = WindowsGatewayBackend(runner).wait_for_tun(
-        "UAC-Spoofer",
+        "CubeVPN",
         timeout=1,
     )
 
-    assert tun == TunAdapter(index=44, alias="UAC-Spoofer")
+    assert tun == TunAdapter(index=44, alias="CubeVPN")
     assert runner.calls == 2
 
 
@@ -886,8 +886,8 @@ def test_windows_gateway_apply_uses_forwarding_fallback_without_winnat():
     backend = WindowsGatewayBackend(runner)
     backend.apply({
         "lan": {"index": 31, "alias": "Ethernet 7"},
-        "tun": {"index": 44, "alias": "UAC-Spoofer"},
-        "firewall_rule": "UAC Spoofer Mobile Gateway test",
+        "tun": {"index": 44, "alias": "CubeVPN"},
+        "firewall_rule": "CubeVPN Mobile Gateway test",
     })
 
     assert "-Forwarding Enabled" in runner.script
@@ -911,7 +911,7 @@ def test_windows_gateway_restore_has_forwarding_fallback_without_winnat():
     runner = Runner()
     backend = WindowsGatewayBackend(runner)
     backend.restore({
-        "firewall_rule": "UAC Spoofer Mobile Gateway test",
+        "firewall_rule": "CubeVPN Mobile Gateway test",
         "windows": {
             "interfaces": [{
                 "index": 31,
@@ -950,6 +950,6 @@ def fixture_state(windows):
         "capture": {"name": "npcap-wifi", "mac": windows.lan.mac},
         "gateway_mac": "aa:bb:cc:dd:ee:01",
         "devices": {"192.168.70.152": "aa:bb:cc:dd:ee:52"},
-        "firewall_rule": "UAC Spoofer Mobile Gateway state-token",
+        "firewall_rule": "CubeVPN Mobile Gateway state-token",
         "windows": windows.snapshot(windows.lan, windows.tun),
     }

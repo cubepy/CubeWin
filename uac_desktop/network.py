@@ -65,7 +65,7 @@ def profile_ping(address: str, port: int, sni: str, timeout: float = 4) -> tuple
         raw.settimeout(timeout)
         context = ssl.create_default_context()
         wrapped = context.wrap_socket(raw, server_hostname=sni)
-        request = f"HEAD / HTTP/1.1\r\nHost: {sni}\r\nUser-Agent: UAC-Spoofer-Desktop\r\nConnection: close\r\n\r\n"
+        request = f"HEAD / HTTP/1.1\r\nHost: {sni}\r\nUser-Agent: CubeVPN-Desktop\r\nConnection: close\r\n\r\n"
         wrapped.sendall(request.encode("ascii"))
         first = wrapped.recv(128)
         elapsed = (time.perf_counter() - started) * 1000
@@ -130,7 +130,7 @@ def _trace_once(domain: str, timeout: float, edge_ip: str | None = None) -> dict
         sock = context.wrap_socket(raw, server_hostname=domain)
         result["tls"] = True
         result["handshake"] = int((time.perf_counter() - tls_start) * 1000)
-        request = f"GET /cdn-cgi/trace HTTP/1.1\r\nHost: {domain}\r\nUser-Agent: UAC-Spoofer-Desktop\r\nConnection: close\r\n\r\n"
+        request = f"GET /cdn-cgi/trace HTTP/1.1\r\nHost: {domain}\r\nUser-Agent: CubeVPN-Desktop\r\nConnection: close\r\n\r\n"
         sock.sendall(request.encode("ascii"))
         chunks, total = [], 0
         first = None
@@ -299,7 +299,7 @@ def current_location(proxy: bool = False, timeout: float = 5.0) -> GeoLocation |
                 "https": "http://127.0.0.1:20809"} if proxy else None)
     session = requests.Session()
     session.trust_env = False
-    headers = {"User-Agent": "UAC-Spoofer-Desktop/exit-country"}
+    headers = {"User-Agent": "CubeVPN-Desktop/exit-country"}
     try:
         try:
             response = session.get("https://ipwho.is/", proxies=proxies,

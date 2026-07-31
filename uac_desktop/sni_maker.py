@@ -676,7 +676,7 @@ class SniConfigMaker:
             etag: str = "",
             session=None) -> SniImportResult:
         source_url = normalize_repository_url(url)
-        headers = {"User-Agent": "UAC-Spoofer-Desktop/SNI-Maker"}
+        headers = {"User-Agent": "CubeVPN-Desktop/SNI-Maker"}
         if str(etag or "").strip():
             headers["If-None-Match"] = str(etag).strip()
         client = session or requests

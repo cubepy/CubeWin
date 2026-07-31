@@ -1,3 +1,3 @@
-"""UAC Spoofer Desktop core package."""
+"""CubeVPN desktop core package."""
 
 __version__ = "1.0.6"
