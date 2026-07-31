@@ -172,7 +172,7 @@ def _probe_proxy(
     session = requests.Session()
     session.trust_env = False
     headers = {
-        "User-Agent": "UAC-Spoofer-Desktop/SNI-Maker",
+        "User-Agent": "CubeVPN-Desktop/SNI-Maker",
         "Cache-Control": "no-cache",
     }
     errors = []

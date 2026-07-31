@@ -42,7 +42,7 @@ def acquire_single_instance() -> bool:
     if sys.platform != "win32":
         return True
     kernel32 = ctypes.windll.kernel32
-    _INSTANCE_MUTEX = kernel32.CreateMutexW(None, False, "Local\\UAC-Spoofer-Desktop-v1")
+    _INSTANCE_MUTEX = kernel32.CreateMutexW(None, False, "Local\\CubeVPN-Desktop-v1")
     return bool(_INSTANCE_MUTEX) and kernel32.GetLastError() != 183
 
 
@@ -127,11 +127,11 @@ def main() -> int:
 
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
     app = QApplication(sys.argv)
-    app.setApplicationName("UAC Spoofer Desktop")
-    app.setOrganizationName("UAC")
+    app.setApplicationName("CubeVPN")
+    app.setOrganizationName("CubeVPN")
     if not acquire_single_instance():
         from PySide6.QtWidgets import QMessageBox
-        QMessageBox.information(None, "UAC Spoofer Desktop", "UAC Spoofer is already running.")
+        QMessageBox.information(None, "CubeVPN", "CubeVPN is already running.")
         return 0
     WindowsProxy.recover_stale()
     GatewayManager().recover()

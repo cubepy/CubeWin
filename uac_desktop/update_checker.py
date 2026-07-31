@@ -256,7 +256,7 @@ def check_latest_release(
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": GITHUB_API_VERSION,
-        "User-Agent": f"UAC-Spoofer-Desktop/{installed}",
+        "User-Agent": f"CubeVPN-Desktop/{installed}",
     }
     try:
         try:

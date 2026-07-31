@@ -141,7 +141,7 @@ def test_latest_release_uses_expected_api_headers_timeout_and_package_version():
     assert kwargs["timeout"] == DEFAULT_TIMEOUT
     assert kwargs["headers"]["Accept"] == "application/vnd.github+json"
     assert kwargs["headers"]["X-GitHub-Api-Version"] == GITHUB_API_VERSION
-    assert kwargs["headers"]["User-Agent"] == f"UAC-Spoofer-Desktop/{__version__}"
+    assert kwargs["headers"]["User-Agent"] == f"CubeVPN-Desktop/{__version__}"
 
 
 def test_same_or_older_release_is_not_an_update():

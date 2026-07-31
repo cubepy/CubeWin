@@ -148,7 +148,7 @@ def test_xray_mux_defaults_are_bounded_and_can_be_disabled():
     no_mux = build_xray_config(profile, tuning=Tuning(xray_mux_enabled=False))
     assert "mux" not in no_mux["outbounds"][0]
     assert build_xray_config(profile, tuning=Tuning(log_level="minimal"))["log"]["loglevel"] == "warning"
-    assert USER_AGENT == f"UAC-Spoofer-Desktop/{__version__}"
+    assert USER_AGENT == f"CubeVPN-Desktop/{__version__}"
 
 
 def test_mci_pins_http1_alpn_without_changing_irancell():

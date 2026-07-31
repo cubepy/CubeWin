@@ -27,8 +27,8 @@ from .paths import DATA_DIR
 GATEWAY_DIR = DATA_DIR / "gateway"
 GATEWAY_STATE_FILE = GATEWAY_DIR / "gateway-state.json"
 GATEWAY_STATE_VERSION = 1
-GATEWAY_FIREWALL_PREFIX = "UAC Spoofer Mobile Gateway"
-DEFAULT_TUN_ALIAS = "UAC-Spoofer"
+GATEWAY_FIREWALL_PREFIX = "CubeVPN Mobile Gateway"
+DEFAULT_TUN_ALIAS = "CubeVPN"
 SOCKS_HOST = "127.0.0.1"
 SOCKS_PORT = 20808
 GATEWAY_DNS_RESOLVER = "1.1.1.1"
@@ -1383,7 +1383,7 @@ class GatewayManager:
                 raise GatewayError("UAC engine is not available")
             self.engine = selected_engine
             if not self._engine_ready(selected_engine):
-                raise GatewayError("Connect UAC Spoofer before enabling Mobile Gateway")
+                raise GatewayError("Connect CubeVPN before enabling Mobile Gateway")
             self._emit_state("starting")
             tun_runtime = ""
             state: dict[str, Any] | None = None

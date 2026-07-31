@@ -14,7 +14,7 @@ def bundle_root() -> Path:
 ROOT = bundle_root()
 ASSETS = ROOT / "assets"
 BIN = ROOT / "bin"
-DATA_DIR = Path(os.getenv("APPDATA", Path.home())) / "UAC Spoofer Desktop"
+DATA_DIR = Path(os.getenv("APPDATA", Path.home())) / "CubeVPN"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 SETTINGS_FILE = DATA_DIR / "settings.json"
 PROFILES_FILE = DATA_DIR / "profiles.json"

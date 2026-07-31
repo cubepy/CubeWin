@@ -33,7 +33,7 @@ HTTP_PORT = 20809
 FRAGMENT_PORT = 40443
 INTERNET_SETTINGS = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
 PROXY_STATE_FILE = DATA_DIR / "windows-proxy-restore.json"
-USER_AGENT = f"UAC-Spoofer-Desktop/{__version__}"
+USER_AGENT = f"CubeVPN-Desktop/{__version__}"
 DOWNLOAD_PROBE_BYTES = 256 * 1024
 DOWNLOAD_PROBE_MIN_BYTES = 32 * 1024
 DOWNLOAD_PROBE_URL = "https://speed.cloudflare.com/__down"
@@ -1034,7 +1034,7 @@ def build_singbox_tun_config(
         "inbounds": [{
             "type": "tun",
             "tag": "tun-in",
-            "interface_name": "UAC-Spoofer",
+            "interface_name": "CubeVPN",
             "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
             "mtu": 1400,
             "auto_route": True,
@@ -1836,7 +1836,7 @@ class Engine:
                 )
                 self._tun_reader.start()
                 self.log(
-                    f"SING-BOX TUN started interface=UAC-Spoofer "
+                    f"SING-BOX TUN started interface=CubeVPN "
                     f"socks=127.0.0.1:{SOCKS_PORT}"
                 )
             except Exception:
@@ -1934,7 +1934,7 @@ class Engine:
         self.gateway.start(
             engine=self,
             health_check=lambda: self.running and self._run_id == run_id,
-            tun_alias="UAC-Spoofer",
+            tun_alias="CubeVPN",
             cancel_event=cancel_event,
         )
         try:
