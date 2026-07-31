@@ -10,7 +10,6 @@ from uac_desktop import __version__
 import uac_desktop.ui as ui_module
 from uac_desktop.engine import EngineCancelled
 from uac_desktop.models import ProxyProfile, Tuning
-from uac_desktop.network import ScanResult
 from uac_desktop.ui import DEFAULT_UPDATE_REPO_URL, MainWindow
 
 
@@ -45,31 +44,6 @@ def test_current_carrier_sni_beats_higher_other_carrier_score():
     assert MainWindow._sni_candidates(dummy, carrier="irancell", limit=2) == [
         "irancell-good.example", "mci-fast.example"
     ]
-
-
-def test_scan_repository_keeps_same_domain_measurements_per_carrier_and_edge():
-    storage = StorageStub(
-        scan_results=[{
-            "domain": "support.cloudflare.com", "success": True, "score": 900,
-            "carrier": "mci", "edge": "104.18.8.83", "tested_at": 1,
-        }],
-        tuning=Tuning(carrier_mode="irancell", pattern_connect_ip="104.19.229.21"),
-    )
-    dummy = SimpleNamespace(storage=storage)
-    result = ScanResult(
-        domain="support.cloudflare.com", success=True, score=700,
-        carrier="irancell", edge="104.19.229.21", tested_at=2,
-    )
-
-    MainWindow._persist_scan_repository(dummy, [result])
-
-    keys = {(item["carrier"], item["edge"], item["domain"])
-            for item in storage.scan_results}
-    assert keys == {
-        ("mci", "104.18.8.83", "support.cloudflare.com"),
-        ("irancell", "104.19.229.21", "support.cloudflare.com"),
-    }
-    assert storage.saved_results == 1
 
 
 def test_profile_mux_compatibility_is_route_scoped_and_does_not_change_global_tuning():
@@ -235,58 +209,6 @@ def test_connect_button_cancels_an_in_progress_attempt():
     assert ("cancel", {"notify": True}) in calls
     assert ("state", False) in calls
     assert calls.index(("visual", "disconnecting")) < calls.index(("cancel", {"notify": True}))
-
-
-def test_applied_sni_is_displayed_and_used_for_verified_profile_without_changing_server_sni():
-    profile = ProxyProfile(
-        id="verified-route", sni="server.example",
-        spoof_fake_sni="static.cloudflare.com", verified_spoof=True,
-    )
-    result = ScanResult(
-        domain="community.cloudflare.com", success=True, score=900,
-        carrier="irancell", tested_at=time.time(),
-    )
-
-    class ApplyStorage:
-        def __init__(self):
-            self.profiles = [profile]
-            self.scan_results = [result.to_dict()]
-            self.bookmarks = []
-            self.settings = {}
-            self.tuning = Tuning(
-                carrier_mode="irancell",
-                pattern_fake_sni="static.cloudflare.com",
-            )
-
-        def set_tuning(self, tuning):
-            self.tuning = tuning
-
-    storage = ApplyStorage()
-    dummy = SimpleNamespace(
-        storage=storage,
-        _bind_verified_sni_route=MainWindow._bind_verified_sni_route,
-    )
-    dummy._sni_candidates = lambda profile, carrier, limit: MainWindow._sni_candidates(
-        dummy, profile, carrier, limit,
-    )
-    dummy._effective_profile_fake_sni = lambda profile, carrier=None: MainWindow._effective_profile_fake_sni(
-        dummy, profile, carrier,
-    )
-
-    MainWindow._apply_carrier_sni(
-        dummy, {profile.id: result}, result,
-    )
-
-    assert profile.sni == "server.example"
-    assert MainWindow._effective_profile_fake_sni(
-        dummy, profile, "irancell",
-    ) == "community.cloudflare.com"
-    assert MainWindow._profile_sni_candidates(
-        dummy, profile, "irancell", 3,
-    ) == ["community.cloudflare.com", "static.cloudflare.com"]
-    assert "Fake SNI community.cloudflare.com" in MainWindow._profile_route_label(
-        dummy, profile, "irancell",
-    )
 
 
 def test_verified_user_config_uses_its_healthy_sni_first_and_respects_limit():

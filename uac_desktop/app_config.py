@@ -19,8 +19,15 @@ PORTABLE_DOWNLOAD_URL = (
     f"{GITHUB_RELEASES_URL}/latest/download/"
     f"CubeVPN-v{CURRENT_VERSION}-Windows-x64-portable.zip"
 )
-SUGGESTED_CONFIGS_URL = (
-    "https://raw.githubusercontent.com/Floxu1/"
-    "UAC-SNI-Spoofer-Windows/main/configs.txt"
-)
 PROJECT_URL = UPDATE_REPOSITORY_URL
+
+# Base URL of the CubeVPN account API (see docs/api-contract.md in the CubeVPN
+# Android repo — this client talks to the same three endpoints:
+# requestcode.php / verifycode.php / accountme.php).
+#
+# Left empty in source control on purpose. The release workflow
+# (.github/workflows/release-cubevpn-windows.yml) replaces the value below at
+# build time from a repo secret, the same way the Android app injects
+# API_BASE_URL from secrets.properties and the CubeVPN Windows/WPF client
+# injects it into CubeApiConfig.cs.
+CUBE_API_BASE_URL = ""
