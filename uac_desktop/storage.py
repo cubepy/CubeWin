@@ -6,8 +6,11 @@ import threading
 from pathlib import Path
 
 from .app_config import UPDATE_REPOSITORY_URL
-from .models import ProxyProfile, Tuning, default_profiles, verified_profiles
+from .models import ProxyProfile, Tuning
 from .paths import BOOKMARKS_FILE, PROFILES_FILE, SETTINGS_FILE, SNI_RESULTS_FILE
+
+
+_BUNDLED_CONFIG_ORIGINS = ("builtin", "verified")
 
 
 _IO_LOCK = threading.RLock()
@@ -374,20 +377,16 @@ class Storage:
     def _load_profiles(self) -> list[ProxyProfile]:
         raw = _read(PROFILES_FILE, [])
         profiles = [ProxyProfile.from_dict(x) for x in raw if isinstance(x, dict)]
-        if not profiles:
-            profiles = default_profiles()
-            _write(PROFILES_FILE, [x.to_dict() for x in profiles])
-        return profiles
+        kept = [p for p in profiles if p.origin not in _BUNDLED_CONFIG_ORIGINS]
+        if len(kept) != len(profiles):
+            _write(PROFILES_FILE, [x.to_dict() for x in kept])
+        return kept
 
     def _migrate_verified_configs(self) -> None:
-        """Add or adopt this release's measured spoof snapshot without duplicates.
+        """No-op: the bundled free/suggested config catalogue has been removed.
 
-        Version 1 only compared URI signatures.  Users who had already imported
-        the tested list kept those rows as ordinary manual profiles, so the
-        country picker saw zero routes.  Version 2 upgrades the matching rows in
-        place (preserving their IDs/benchmarks) and appends only missing routes.
-        Versions 3-4 tag historically rotating exits and move them out of a
-        fixed country until a fresh in-tunnel location measurement exists.
+        Kept only so the settings version key still advances past releases
+        that used to seed and re-sync the bundled spoof config snapshot.
         """
         try:
             previous_version = int(self.settings.get("verified_configs_version", 0) or 0)
@@ -395,65 +394,6 @@ class Storage:
             previous_version = 0
         if previous_version >= _VERIFIED_CONFIGS_VERSION:
             return
-
-        known_ids = {profile.id for profile in self.profiles}
-        by_source = {
-            str(profile.source_uri or "").strip(): profile
-            for profile in self.profiles if str(profile.source_uri or "").strip()
-        }
-
-
-
-        by_route = {
-            str(profile.source_uri or "").strip().rsplit("#", 1)[0]: profile
-            for profile in self.profiles
-            if (str(profile.source_uri or "").strip()
-                and (profile.verified_spoof
-                     or str(profile.source_uri or "").rsplit("#", 1)[-1]
-                     .upper().startswith("SPOOF-")))
-        }
-        changed = False
-        for profile in verified_profiles():
-            existing = by_source.get(profile.source_uri)
-            if existing is None:
-                existing = by_route.get(profile.source_uri.rsplit("#", 1)[0])
-            if existing is not None:
-                preserve_live_country = (
-                    float(existing.country_verified_at or 0) > 0
-                    and len(str(existing.observed_country_code or "")) == 2
-                )
-                for field in (
-                    "name", "address", "fallback_address", "port", "sni",
-                    "method", "source_uri", "protocol", "config_host",
-                    "config_port", "origin", "country_code",
-                    "country_latency_ms", "verified_spoof", "spoof_fake_sni",
-                    "rotating_exit",
-                ):
-                    if preserve_live_country and field in {"name", "country_code"}:
-                        continue
-                    value = getattr(profile, field)
-                    if getattr(existing, field) != value:
-                        setattr(existing, field, value)
-                        changed = True
-
-
-                if preserve_live_country:
-                    name_parts = existing.name.rsplit(" · ", 1)
-                    tail = name_parts[-1].strip().lower()
-                    if (len(name_parts) == 2 and tail.endswith(" ms")
-                            and tail[:-3].strip().isdigit()):
-                        existing.name = name_parts[0]
-                        changed = True
-                continue
-            if profile.id in known_ids:
-                continue
-            self.profiles.append(profile)
-            known_ids.add(profile.id)
-            by_source[profile.source_uri] = profile
-            by_route[profile.source_uri.rsplit("#", 1)[0]] = profile
-            changed = True
-        if changed:
-            self.save_profiles()
         self.settings["verified_configs_version"] = _VERIFIED_CONFIGS_VERSION
         self.save_settings()
 

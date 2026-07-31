@@ -12,7 +12,7 @@ from html import escape
 from typing import Final
 
 from PySide6.QtCore import QByteArray, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPainter, QPen, QPixmap
 
 try:
     from PySide6.QtSvg import QSvgRenderer
@@ -211,10 +211,21 @@ def _svg(name: str, colour: QColor) -> bytes:
     ).encode("utf-8")
 
 
+def _device_pixel_ratio() -> float:
+    """Return the primary screen's device pixel ratio, or 1.0 outside a running app."""
+
+    app = QGuiApplication.instance()
+    screen = app.primaryScreen() if app is not None else None
+    ratio = float(screen.devicePixelRatio()) if screen is not None else 1.0
+    return ratio if ratio > 0 else 1.0
+
+
 def _fallback_pixmap(name: str, colour: QColor, size: int) -> QPixmap:
     """Draw a recognisable fallback when QtSvg is not installed."""
 
-    result = QPixmap(size, size)
+    dpr = _device_pixel_ratio()
+    result = QPixmap(max(1, round(size * dpr)), max(1, round(size * dpr)))
+    result.setDevicePixelRatio(dpr)
     result.fill(Qt.GlobalColor.transparent)
     painter = QPainter(result)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -244,7 +255,9 @@ def pixmap(name: str, color: str = "#9fb4d8", size: int = 22) -> QPixmap:
     if QSvgRenderer is None:
         return _fallback_pixmap(key, colour, icon_size)
 
-    result = QPixmap(icon_size, icon_size)
+    dpr = _device_pixel_ratio()
+    result = QPixmap(max(1, round(icon_size * dpr)), max(1, round(icon_size * dpr)))
+    result.setDevicePixelRatio(dpr)
     result.fill(Qt.GlobalColor.transparent)
     renderer = QSvgRenderer(QByteArray(_svg(key, colour)))
     if not renderer.isValid():

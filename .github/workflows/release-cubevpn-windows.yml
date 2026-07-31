@@ -33,6 +33,17 @@ jobs:
         shell: pwsh
         run: .\install-engine.ps1
 
+      - name: Configure account API base URL
+        shell: bash
+        env:
+          CUBE_API_BASE_URL: ${{ secrets.CUBE_API_BASE_URL }}
+        run: |
+          if [ -z "$CUBE_API_BASE_URL" ]; then
+            echo "::warning::CUBE_API_BASE_URL secret is not set — sign-in will be disabled in this build."
+          fi
+          sed -i "s#CUBE_API_BASE_URL = \"\"#CUBE_API_BASE_URL = \"${CUBE_API_BASE_URL}\"#" \
+            ./uac_desktop/app_config.py
+
       - name: Run test suite
         run: python -m pytest tests -q
 

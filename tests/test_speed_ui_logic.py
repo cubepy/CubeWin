@@ -1,82 +1,8 @@
 import time
 from types import SimpleNamespace
 
-from uac_desktop.network import ScanResult
 from uac_desktop.storage import Storage
 from uac_desktop.ui import MainWindow
-
-
-class ProgressStub:
-    def __init__(self):
-        self.values = []
-        self.formats = []
-
-    def setValue(self, value):
-        self.values.append(value)
-
-    def setFormat(self, value):
-        self.formats.append(value)
-
-
-class ActivityStub:
-    def __init__(self):
-        self.messages = []
-
-    def set_activity(self, *value):
-        self.messages.append(value)
-
-
-def _scan_dummy(generation=7):
-    streamed = []
-    dummy = SimpleNamespace(
-        _scan_generation=generation,
-        scanning=True,
-        scan_progress=ProgressStub(),
-        activity_bar=ActivityStub(),
-        language="fa",
-        storage=SimpleNamespace(tuning=SimpleNamespace(
-            carrier_mode="irancell", pattern_connect_ip="104.19.229.21")),
-        _scan_context={
-            "generation": generation,
-            "carrier": "irancell",
-            "edge": "104.19.229.21",
-        },
-        _scan_results_by_domain={},
-        _upsert_scan_result=streamed.append,
-        tr=lambda fa, en=None: fa,
-    )
-    return dummy, streamed
-
-
-def test_successful_sni_is_streamed_before_scan_done():
-    dummy, streamed = _scan_dummy()
-    result = ScanResult(
-        domain="support.cloudflare.com",
-        success=True,
-        score=900,
-        edge="104.19.229.21",
-        edge_verified=True,
-    )
-
-    MainWindow._scan_progress(dummy, 1, 20, result, 7)
-
-    assert dummy.scan_progress.values == [1]
-    assert dummy.scan_progress.formats[-1].startswith("1/20")
-    assert streamed == [result]
-    assert dummy._scan_results_by_domain[result.domain] is result
-    assert result.carrier == "irancell"
-    assert result.edge == "104.19.229.21"
-    assert result.edge_verified is True
-    assert result.tested_at > 0
-
-
-def test_failed_or_stale_sni_is_not_inserted_into_live_table():
-    dummy, streamed = _scan_dummy()
-    MainWindow._scan_progress(dummy, 1, 2, ScanResult(domain="failed.example"), 7)
-    MainWindow._scan_progress(dummy, 2, 2, ScanResult(domain="stale.example", success=True), 6)
-
-    assert streamed == []
-    assert dummy.scan_progress.values == [1]
 
 
 def test_recent_working_sni_precedes_higher_unverified_lab_score():

@@ -3,9 +3,10 @@
 This is CubeVPN's Windows desktop client — a privately-distributed, custom-branded
 build of [UAC SNI Spoofer Windows](https://github.com/Floxu1/UAC-SNI-Spoofer-Windows)
 by Floxu1, using the Patterniha SNI-spoofing method, kept under the same
-[GPL-3.0](LICENSE) license as the upstream project. Telegram OTP sign-in
-(matching the CubeVPN Android app and CubeVPN Windows/WPF client) is planned
-as a follow-up on top of this rebrand.
+[GPL-3.0](LICENSE) license as the upstream project. This client only works with
+configs from your own account — there are no bundled or suggested free configs.
+Sign in with a Telegram one-time code (matching the CubeVPN Android app and
+CubeVPN Windows/WPF client) from the "Sign In" button on the Configs page.
 
 ---
 

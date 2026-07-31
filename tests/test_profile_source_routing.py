@@ -192,15 +192,12 @@ def routing_dummy(storage, source_index=0, country="ALL"):
 def refresh_dummy(storage):
     manual = ListStub()
     user_config = ListStub()
-    suggested = ListStub()
     dummy = SimpleNamespace(
         storage=storage,
         language="en",
         manual_list=manual,
         user_config_list=user_config,
-        suggested_list=suggested,
         profile_tabs=IndexStub(0),
-        sync_btn=SimpleNamespace(setEnabled=lambda _enabled: None),
         config_count_label=LabelStub(),
         active_profile=LabelStub(),
         route_card=SimpleNamespace(set_secondary=lambda _text: None),
@@ -231,7 +228,7 @@ def header_texts(widget):
     ]
 
 
-def test_configs_page_keeps_manual_user_config_and_suggested_separate(monkeypatch):
+def test_configs_page_keeps_manual_and_user_config_separate(monkeypatch):
     manual = profile("manual-one", origin="user")
     maker = profile(
         "maker-one",
@@ -241,10 +238,7 @@ def test_configs_page_keeps_manual_user_config_and_suggested_separate(monkeypatc
         verified=True,
         ping=55,
     )
-    suggested = profile(
-        "suggested-one", origin="github", country="DE", verified=True, ping=70
-    )
-    storage = StorageStub([suggested, maker, manual], selected_id=maker.id)
+    storage = StorageStub([maker, manual], selected_id=maker.id)
     dummy = refresh_dummy(storage)
     monkeypatch.setattr(ui_module, "country_flag_icon", lambda *_args: QIcon())
     monkeypatch.setattr(ui_module, "cyber_icon", lambda *_args: QIcon())
@@ -253,7 +247,6 @@ def test_configs_page_keeps_manual_user_config_and_suggested_separate(monkeypatc
 
     assert item_ids(dummy.manual_list) == [manual.id]
     assert item_ids(dummy.user_config_list) == [maker.id]
-    assert item_ids(dummy.suggested_list) == [suggested.id]
     assert dummy.user_config_list.current.data(Qt.UserRole) == maker.id
 
 

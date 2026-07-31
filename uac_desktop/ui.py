@@ -31,40 +31,27 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
     QFileDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit,
-    QPushButton, QScrollArea, QStackedWidget, QTableView,
+    QPushButton, QScrollArea, QStackedWidget,
     QTableWidget, QTableWidgetItem,
-    QTabBar, QTabWidget, QTextEdit, QVBoxLayout, QWidget, QSizePolicy, QGraphicsDropShadowEffect,
+    QTabWidget, QTextEdit, QVBoxLayout, QWidget, QSizePolicy, QGraphicsDropShadowEffect,
     QGraphicsOpacityEffect, QBoxLayout, QStyle, QStyleOptionButton, QToolButton,
     QSystemTrayIcon, QMenu,
 )
 
-from . import __version__
-from .app_config import PROJECT_URL, SUGGESTED_CONFIGS_URL, UPDATE_REPOSITORY_URL
+from . import __version__, cube_auth
+from .app_config import PROJECT_URL, UPDATE_REPOSITORY_URL
 from .engine import Engine, EngineCancelled, format_bytes, mci_quality_score
 from .models import ProxyProfile, Tuning, parse_many
 from .network import (GeoLocation, ScanResult, current_ip, current_location,
-                      profile_ping, profile_real_delay, scan_domains, tcp_ping)
+                      profile_ping, profile_real_delay, tcp_ping)
 from .paths import ASSETS, DATA_DIR, LOG_FILE
-from .sni_batch import LiveConfigResult, SniBatchTester
-from .sni_maker import (
-    SniConfigMaker, SniImportResult, config_signature,
-)
-from .sni_maker_widgets import (
-    ConfigDropEdit, CountryRail, MakerColumns, MakerFilterProxy,
-    MakerResultsModel, MakerRoles, normalize_country_code,
-)
 from .storage import Storage
 from .icons import icon as cyber_icon, pixmap as cyber_pixmap
 from .update_checker import SemVersion, UpdateInfo, check_latest_release, parse_github_repository
 from .verified_configs import COUNTRIES, VERIFIED_SPOOF_EDGE, VERIFIED_SPOOF_FAKE_SNI
 
 
-REMOTE_CONFIGS_URL = SUGGESTED_CONFIGS_URL
 DEFAULT_UPDATE_REPO_URL = UPDATE_REPOSITORY_URL
-DEFAULT_SNI_MAKER_URL = "https://mifa.world/vless"
-LEGACY_SNI_MAKER_URLS = frozenset({
-    "https://raw.githubusercontent.com/Delta-Kronecker/Sub/refs/heads/main/config/sni/all_configs_sni.txt",
-})
 USER_CONFIG_ORIGIN = "sni-maker"
 MANUAL_PROFILE_ORIGINS = frozenset({"user"})
 USER_CONFIG_ORIGINS = frozenset({USER_CONFIG_ORIGIN})
@@ -222,13 +209,6 @@ class Bridge(QObject):
     traffic = Signal(int, int)
     latency = Signal(float, str)
     target_latency = Signal(float, str, int)
-    maker_imported = Signal(object, object, int)
-    maker_batch = Signal(object, int, int, int)
-    maker_done = Signal(object, int)
-    maker_failed = Signal(str, int)
-    scan_progress = Signal(int, int, object, int)
-    scan_done = Signal(object, int)
-    scan_failed = Signal(str, int)
     error = Signal(str)
     profiles_changed = Signal()
     ip = Signal(str)
@@ -1745,6 +1725,266 @@ class ProfileDialog(QDialog):
         return out
 
 
+class _CubeAuthWorker(QObject):
+    request_code_done = Signal(object)
+    verify_code_done = Signal(object)
+
+
+class _CubeAccountWorker(QObject):
+    done = Signal(object)
+
+
+class _CubeImportWorker(QObject):
+    done = Signal(object, bool)
+
+
+class CubeLoginDialog(QDialog):
+    """Two-step Telegram OTP sign-in, mirroring the Android app and the
+    CubeVPN Windows/WPF client's requestcode.php / verifycode.php flow."""
+
+    def __init__(self, parent, language: str = "fa"):
+        super().__init__(parent)
+        self.setObjectName("cubeLoginDialog")
+        t = lambda fa, en: en if language == "en" else fa
+        self._t = t
+        self.setWindowTitle(t("ورود به حساب کیوب‌وی‌پی‌ان", "Sign in to CubeVPN"))
+        self.setMinimumWidth(420)
+        self.setLayoutDirection(Qt.LeftToRight if language == "en" else Qt.RightToLeft)
+        self._identifier = ""
+        self._cooldown_seconds = 0
+        self.token = ""
+        self.user: cube_auth.CubeAuthUser | None = None
+
+        self._worker = _CubeAuthWorker()
+        self._worker.request_code_done.connect(self._on_request_code_done)
+        self._worker.verify_code_done.connect(self._on_verify_code_done)
+        self._cooldown_timer = QTimer(self)
+        self._cooldown_timer.setInterval(1000)
+        self._cooldown_timer.timeout.connect(self._tick_cooldown)
+
+        layout = QVBoxLayout(self); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(0)
+        header = QFrame(); header.setObjectName("modalHeader"); header_layout = QHBoxLayout(header); header_layout.setContentsMargins(26, 21, 26, 19); header_layout.setSpacing(14)
+        header_icon = QLabel(); header_icon.setObjectName("modalIcon"); header_icon.setFixedSize(46, 46); header_icon.setPixmap(cyber_pixmap("lock", "#A855F7", 25)); header_layout.addWidget(header_icon)
+        header_copy = QVBoxLayout(); header_copy.setSpacing(4)
+        heading = QLabel(t("ورود با تلگرام", "Sign in with Telegram")); heading.setObjectName("modalTitle")
+        subtitle = QLabel(t("کد یک‌بارمصرف را از ربات @cubevvpn_bot دریافت می‌کنید.", "You'll receive a one-time code from @cubevvpn_bot.")); subtitle.setObjectName("modalSubtitle"); subtitle.setWordWrap(True)
+        header_copy.addWidget(heading); header_copy.addWidget(subtitle); header_layout.addLayout(header_copy, 1)
+        layout.addWidget(header)
+
+        body = QWidget(); body_layout = QVBoxLayout(body); body_layout.setContentsMargins(24, 20, 24, 20); body_layout.setSpacing(14)
+
+        self.step1 = QWidget(); step1_layout = QVBoxLayout(self.step1); step1_layout.setContentsMargins(0, 0, 0, 0); step1_layout.setSpacing(8)
+        step1_label = QLabel(t("شماره موبایل یا آیدی تلگرام", "Phone number or Telegram ID")); step1_label.setObjectName("fieldLabel")
+        self.identifier_field = QLineEdit(); self.identifier_field.setPlaceholderText(t("مثلاً 09123456789 یا user@telegram", "e.g. 09123456789 or a Telegram username"))
+        self.identifier_field.returnPressed.connect(self._request_code)
+        step1_layout.addWidget(step1_label); step1_layout.addWidget(self.identifier_field)
+
+        self.step2 = QWidget(); step2_layout = QVBoxLayout(self.step2); step2_layout.setContentsMargins(0, 0, 0, 0); step2_layout.setSpacing(8)
+        step2_label = QLabel(t("کد تایید", "Verification code")); step2_label.setObjectName("fieldLabel")
+        self.code_field = QLineEdit(); self.code_field.setPlaceholderText(t("کد ارسال‌شده در تلگرام", "The code sent to you on Telegram"))
+        self.code_field.returnPressed.connect(self._verify_code)
+        resend_row = QHBoxLayout(); resend_row.setSpacing(8)
+        self.change_button = QPushButton(t("تغییر شماره", "Change number")); self.change_button.setObjectName("modalSecondary"); self.change_button.clicked.connect(self._show_step1)
+        self.resend_button = QPushButton(t("ارسال دوباره", "Resend")); self.resend_button.setObjectName("modalSecondary"); self.resend_button.clicked.connect(self._request_code)
+        resend_row.addWidget(self.change_button); resend_row.addStretch(); resend_row.addWidget(self.resend_button)
+        step2_layout.addWidget(step2_label); step2_layout.addWidget(self.code_field); step2_layout.addLayout(resend_row)
+        self.step2.setVisible(False)
+
+        self.error_label = QLabel(""); self.error_label.setObjectName("validationError"); self.error_label.setWordWrap(True); self.error_label.setVisible(False)
+
+        body_layout.addWidget(self.step1); body_layout.addWidget(self.step2); body_layout.addWidget(self.error_label)
+        layout.addWidget(body, 1)
+
+        footer = QFrame(); footer.setObjectName("modalFooter"); footer_layout = QHBoxLayout(footer); footer_layout.setContentsMargins(24, 15, 24, 18); footer_layout.addStretch()
+        self.cancel_button = QPushButton(t("انصراف", "Cancel")); self.cancel_button.setObjectName("modalSecondary"); self.cancel_button.clicked.connect(self.reject)
+        self.primary_button = QPushButton(t("دریافت کد", "Get Code")); self.primary_button.setObjectName("modalPrimary"); self.primary_button.setDefault(True); self.primary_button.clicked.connect(self._on_primary)
+        footer_layout.addWidget(self.cancel_button); footer_layout.addWidget(self.primary_button)
+        layout.addWidget(footer)
+
+        if not cube_auth.is_configured():
+            self._show_error(t(
+                "این نسخه هنوز به سرویس حساب کاربری متصل نیست.",
+                "This build isn't connected to the account service yet.",
+            ))
+            self.primary_button.setEnabled(False)
+            self.identifier_field.setEnabled(False)
+
+    def _on_primary(self):
+        if self.step2.isVisible():
+            self._verify_code()
+        else:
+            self._request_code()
+
+    def _show_step1(self):
+        self._cooldown_timer.stop()
+        self.step2.setVisible(False)
+        self.step1.setVisible(True)
+        self.primary_button.setText(self._t("دریافت کد", "Get Code"))
+        self._show_error(None)
+        self.identifier_field.setFocus()
+
+    def _show_error(self, message):
+        self.error_label.setText(message or "")
+        self.error_label.setVisible(bool(message))
+
+    def _set_busy(self, busy):
+        self.primary_button.setEnabled(not busy)
+        self.identifier_field.setEnabled(not busy)
+        self.code_field.setEnabled(not busy)
+        self.change_button.setEnabled(not busy)
+
+    def _request_code(self):
+        identifier = self._identifier if self.step2.isVisible() else self.identifier_field.text().strip()
+        if not identifier:
+            return
+        self._show_error(None)
+        self._set_busy(True)
+
+        def work():
+            result = cube_auth.request_code(identifier)
+            self._worker.request_code_done.emit((identifier, result))
+
+        threading.Thread(target=work, name="cube-request-code", daemon=True).start()
+
+    def _on_request_code_done(self, payload):
+        identifier, result = payload
+        self._set_busy(False)
+        if isinstance(result, cube_auth.RequestCodeOk):
+            self._identifier = identifier
+            self.step1.setVisible(False)
+            self.step2.setVisible(True)
+            self.primary_button.setText(self._t("تایید کد", "Verify Code"))
+            self.code_field.clear(); self.code_field.setFocus()
+            self._start_cooldown(result.cooldown_seconds)
+        else:
+            self._show_error(result.message)
+
+    def _verify_code(self):
+        code = self.code_field.text().strip()
+        if not code:
+            return
+        self._show_error(None)
+        self._set_busy(True)
+
+        def work():
+            result = cube_auth.verify_code(self._identifier, code)
+            self._worker.verify_code_done.emit(result)
+
+        threading.Thread(target=work, name="cube-verify-code", daemon=True).start()
+
+    def _on_verify_code_done(self, result):
+        self._set_busy(False)
+        if isinstance(result, cube_auth.VerifyOk):
+            self.token = result.token
+            self.user = result.user
+            self.accept()
+        else:
+            self._show_error(result.message)
+
+    def _start_cooldown(self, seconds):
+        self._cooldown_seconds = max(0, int(seconds))
+        self.resend_button.setEnabled(self._cooldown_seconds <= 0)
+        self._update_resend_text()
+        if self._cooldown_seconds > 0:
+            self._cooldown_timer.start()
+
+    def _tick_cooldown(self):
+        self._cooldown_seconds -= 1
+        if self._cooldown_seconds <= 0:
+            self._cooldown_timer.stop()
+            self.resend_button.setEnabled(True)
+        self._update_resend_text()
+
+    def _update_resend_text(self):
+        if self._cooldown_seconds > 0:
+            self.resend_button.setText(self._t(f"ارسال دوباره ({self._cooldown_seconds})", f"Resend ({self._cooldown_seconds})"))
+        else:
+            self.resend_button.setText(self._t("ارسال دوباره", "Resend"))
+
+
+class CubeServicesDialog(QDialog):
+    """Lists the signed-in account's purchased services; each entry is only
+    imported into User Config when the user explicitly clicks Add."""
+
+    def __init__(self, parent, services: list, language: str = "fa"):
+        super().__init__(parent)
+        self.setObjectName("cubeServicesDialog")
+        t = lambda fa, en: en if language == "en" else fa
+        self._t = t
+        self.setWindowTitle(t("سرویس‌های من", "My Services"))
+        self.resize(560, 520)
+        self.setMinimumSize(460, 360)
+        self.setLayoutDirection(Qt.LeftToRight if language == "en" else Qt.RightToLeft)
+        self.added_service_ids: set[str] = set()
+
+        layout = QVBoxLayout(self); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(0)
+        header = QFrame(); header.setObjectName("modalHeader"); header_layout = QHBoxLayout(header); header_layout.setContentsMargins(26, 21, 26, 19); header_layout.setSpacing(14)
+        header_icon = QLabel(); header_icon.setObjectName("modalIcon"); header_icon.setFixedSize(46, 46); header_icon.setPixmap(cyber_pixmap("server", "#A855F7", 25)); header_layout.addWidget(header_icon)
+        header_copy = QVBoxLayout(); header_copy.setSpacing(4)
+        heading = QLabel(t("سرویس‌های خریداری‌شده", "Purchased services")); heading.setObjectName("modalTitle")
+        subtitle = QLabel(t("هر سرویس را جداگانه به User Config اضافه کنید.", "Add each service to User Config individually.")); subtitle.setObjectName("modalSubtitle"); subtitle.setWordWrap(True)
+        header_copy.addWidget(heading); header_copy.addWidget(subtitle); header_layout.addLayout(header_copy, 1)
+        layout.addWidget(header)
+
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setFrameShape(QFrame.NoFrame); scroll.setObjectName("modalScroll")
+        body = QWidget(); self._body_layout = QVBoxLayout(body); body_layout = self._body_layout; body_layout.setContentsMargins(24, 20, 24, 20); body_layout.setSpacing(12)
+
+        if not services:
+            empty = QLabel(t("هیچ سرویس فعالی برای این حساب یافت نشد.", "No active services were found for this account."))
+            empty.setObjectName("settingsSubtitle"); empty.setWordWrap(True); empty.setAlignment(Qt.AlignCenter)
+            body_layout.addWidget(empty)
+        else:
+            for service in services:
+                body_layout.addWidget(self._service_card(service, t))
+        body_layout.addStretch()
+        scroll.setWidget(body); layout.addWidget(scroll, 1)
+
+        footer = QFrame(); footer.setObjectName("modalFooter"); footer_layout = QHBoxLayout(footer); footer_layout.setContentsMargins(24, 15, 24, 18)
+        signout_button = QPushButton(t("خروج از حساب", "Sign Out")); signout_button.setObjectName("modalSecondary"); signout_button.clicked.connect(self._sign_out_clicked)
+        footer_layout.addWidget(signout_button); footer_layout.addStretch()
+        close_button = QPushButton(t("بستن", "Close")); close_button.setObjectName("modalPrimary"); close_button.setDefault(True); close_button.clicked.connect(self.accept)
+        footer_layout.addWidget(close_button)
+        layout.addWidget(footer)
+
+    def _sign_out_clicked(self):
+        self.parent()._cube_sign_out()
+        self.reject()
+
+    def _service_card(self, service, t) -> QFrame:
+        frame = QFrame(); frame.setObjectName("settingsSection"); section = QVBoxLayout(frame); section.setContentsMargins(18, 16, 18, 17); section.setSpacing(9)
+        title_row = QHBoxLayout(); title_row.setSpacing(10)
+        title = QLabel(service.name or service.id); title.setObjectName("settingsTitle")
+        title_row.addWidget(title, 1)
+        add_button = QPushButton(t("افزودن", "Add")); add_button.setObjectName("modalPrimary")
+        add_button.clicked.connect(lambda _checked=False, s=service, b=None: self._add_clicked(s, add_button))
+        title_row.addWidget(add_button)
+        section.addLayout(title_row)
+
+        expire_text = (
+            time.strftime("%Y-%m-%d", time.localtime(service.expire))
+            if service.expire > 0 else t("نامشخص", "unknown")
+        )
+        usage_text = f"{format_bytes(service.used_bytes)} / {format_bytes(service.total_bytes)}" if service.total_bytes else format_bytes(service.used_bytes)
+        detail = QLabel(t(f"انقضا: {expire_text}   ·   حجم: {usage_text}", f"Expires: {expire_text}   ·   Usage: {usage_text}"))
+        detail.setObjectName("settingsSubtitle"); detail.setWordWrap(True)
+        section.addWidget(detail)
+        return frame
+
+    def _add_clicked(self, service, button):
+        button.setEnabled(False)
+        button.setText(self._t("در حال افزودن…", "Adding…"))
+        main_window = self.parent()
+        main_window._import_cube_service(service, lambda ok: self._on_add_done(button, service, ok))
+
+    def _on_add_done(self, button, service, ok):
+        if ok:
+            self.added_service_ids.add(service.id)
+            button.setText(self._t("اضافه شد", "Added"))
+        else:
+            button.setEnabled(True)
+            button.setText(self._t("افزودن", "Add"))
+
+
 class TuningDialog(QDialog):
     def __init__(self, parent, tuning: Tuning, language: str = "fa",
                  update_repo_url: str = DEFAULT_UPDATE_REPO_URL,
@@ -1994,8 +2234,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__(); self.setWindowTitle("CubeVPN"); self.resize(1440, 900); self.setMinimumSize(1080, 700)
         self.setAccessibleName("CubeVPN")
-        self.storage = Storage(); self.language = self.storage.settings.get("language", "fa"); self.bridge = Bridge(); self.scan_cancelled = False; self.scanning = False; self.connecting = False; self.connection_error = ""; self.last_results: list[ScanResult] = []; self.sni_undo_snapshot = None; self._toast_timer = None
-        self._scan_generation = 0; self._scan_cancel_event = threading.Event(); self._scan_results_by_domain: dict[str, ScanResult] = {}; self._scan_context = {}
+        self.storage = Storage(); self.language = self.storage.settings.get("language", "fa"); self.bridge = Bridge(); self.connecting = False; self.connection_error = ""; self._toast_timer = None
+        self._cube_account_worker = _CubeAccountWorker(); self._cube_account_worker.done.connect(self._on_cube_account_fetched)
+        self._cube_import_worker = _CubeImportWorker(); self._cube_import_worker.done.connect(self._on_cube_import_done)
         self._update_generation = 0; self._update_in_progress = False; self._latest_update: UpdateInfo | None = None
         self._update_notification = None; self._update_notification_timer = None; self._update_notification_animation = None; self._pending_update_notification = None
         self._closing = False
@@ -2038,28 +2279,9 @@ class MainWindow(QMainWindow):
         self._target_latency_generation = 0
         self._target_latency_busy = False
         self._target_latency_pending = False
-        self._maker_generation = 0
-        self._maker_import_generation = 0
-        self._maker_running = False
-        self._maker_cancel_event = threading.Event()
-        self._maker_tester = None
-        self._maker_profiles = {}
-        self._maker_base_names = {}
-        self._maker_country_labels = {}
-        self._maker_last_country_summary = None
-        self._maker_import_meta = {}
-        self._maker_import_in_progress = False
-        self._maker_last_loaded_url = ""
-        self._maker_last_converted_editor_text = ""
-        self._maker_guide_button = None
-        self._maker_guide_effect = None
-        self._maker_guide_animation = None
         self._profile_ping_generation = 0
         self._profile_ping_busy = False
         self._profile_ping_cancel = threading.Event()
-        self._maker = SniConfigMaker(
-            fake_sni=self.storage.tuning.pattern_fake_sni,
-        )
         self.engine = Engine(self.bridge.log.emit, self.bridge.state.emit, self.bridge.traffic.emit)
         gateway = getattr(self.engine, "gateway", None)
         if gateway is not None:
@@ -2077,7 +2299,7 @@ class MainWindow(QMainWindow):
             self.engine.recover_stale_tun()
         except Exception as exc:
             self._pending_file_log_lines.append(f"sing-box recovery pending: {exc}")
-        self._build(); self._setup_tray(); self._wire(); self._configure_technical_widgets(); self.refresh_profiles(); self.refresh_bookmarks(); self.refresh_processes(); self._apply_language(); self._append_log("کیوب‌وی‌پی‌ان آماده است")
+        self._build(); self._setup_tray(); self._wire(); self._configure_technical_widgets(); self.refresh_profiles(); self.refresh_processes(); self._apply_language(); self._append_log("کیوب‌وی‌پی‌ان آماده است")
         self.activity_bar.set_activity("", "idle", False)
         self._target_latency_timer = QTimer(self); self._target_latency_timer.setInterval(10000); self._target_latency_timer.timeout.connect(self._queue_target_latency_probe); self._target_latency_timer.start()
         QTimer.singleShot(300, self._queue_target_latency_probe)
@@ -2154,7 +2376,7 @@ class MainWindow(QMainWindow):
         mark = QLabel(); mark.setObjectName("logoMark"); mark.setAlignment(Qt.AlignCenter); mark.setFixedSize(52, 52); mark.setPixmap(cyber_pixmap("shield", "#031422", 29)); logo_layout.addWidget(mark)
         logo_text = QVBoxLayout(); logo_text.setSpacing(2); brand = QLabel("CUBEVPN"); brand.setObjectName("brand"); logo_text.addWidget(brand); version = QLabel(f"DESKTOP  {__version__}"); version.setObjectName("version"); version.setLayoutDirection(Qt.LeftToRight); logo_text.addWidget(version); logo_layout.addLayout(logo_text, 1); side.addWidget(logo); side.addSpacing(16)
         self.nav = []
-        entries = [("home", "خانه", "Home"), ("file-cog", "کانفیگ‌ها", "Configs"), ("sparkles", "سازنده کانفیگ اس‌ان‌آی", "SNI Maker"), ("flask", "آزمایشگاه اس‌ان‌آی", "SNI Lab"), ("activity", "لاگ زنده", "Live Logs"), ("shield", "عبور مستقیم برنامه‌ها", "App Bypass"), ("wrench", "ابزارها", "Tools"), ("headphones", "پشتیبانی", "Support")]
+        entries = [("home", "خانه", "Home"), ("file-cog", "کانفیگ‌ها", "Configs"), ("activity", "لاگ زنده", "Live Logs"), ("shield", "عبور مستقیم برنامه‌ها", "App Bypass"), ("wrench", "ابزارها", "Tools"), ("headphones", "پشتیبانی", "Support")]
         self.nav_meta = []
         for index, (icon_name, name, english) in enumerate(entries):
             button = NavButton(english if self.language == "en" else name); button.setIcon(cyber_icon(icon_name, "#9fb4d8", 22)); button.setIconSize(QSize(22, 22)); button.setProperty("iconName", icon_name); button.clicked.connect(lambda _, i=index: self.show_page(i)); side.addWidget(button); self.nav.append(button)
@@ -2174,11 +2396,12 @@ class MainWindow(QMainWindow):
         activity_wrap = QFrame(); self.activity_wrap = activity_wrap; activity_wrap.setObjectName("activityWrap"); activity_layout = QVBoxLayout(activity_wrap); self.activity_layout = activity_layout; activity_layout.setContentsMargins(30, 0, 30, 18)
         self.activity_bar = ActivityBar(self.language); activity_layout.addWidget(self.activity_bar); content_layout.addWidget(activity_wrap)
         layout.addWidget(content_shell, 1)
-        pages = [self._home_page(), self._configs_page(), self._sni_maker_page(), self._scanner_page(), self._logs_page(),
+        pages = [self._home_page(), self._configs_page(), self._logs_page(),
                  self._apps_page(), self._tools_page(), self._support_page()]
         for page in pages:
             page.setObjectName("page")
             self.stack.addWidget(page)
+        self._apply_cube_account_button()
         self.show_page(0)
 
     def _home_page(self):
@@ -2209,12 +2432,7 @@ class MainWindow(QMainWindow):
         country_copy.addWidget(self.country_eyebrow); country_copy.addWidget(self.country_title); country_copy.addWidget(self.country_description); country_layout.addLayout(country_copy, 1)
         country_actions = QVBoxLayout(); self.country_actions = country_actions; country_actions.setSpacing(5)
         self.country_count = QLabel(); self.country_count.setObjectName("countryCount"); self.country_count.setAlignment(Qt.AlignCenter)
-        self.route_source_tabs = QTabBar(); self.route_source_tabs.setObjectName("routeSourceTabs"); self.route_source_tabs.setExpanding(True); self.route_source_tabs.setDrawBase(False)
-        self.route_source_tabs.addTab(self.tr("پیشنهادی", "Suggested")); self.route_source_tabs.addTab("User Config")
-        route_source = str(self.storage.settings.get("route_source", "suggested") or "suggested").lower()
-        self.route_source_tabs.setCurrentIndex(1 if route_source == "user-config" else 0)
-        self.route_source_tabs.setAccessibleName("Connection config source")
-        source_row = QHBoxLayout(); source_row.setSpacing(7); source_row.addWidget(self.route_source_tabs, 1); source_row.addWidget(self.country_count)
+        source_row = QHBoxLayout(); source_row.setSpacing(7); source_row.addStretch(1); source_row.addWidget(self.country_count)
         self.country_combo = QComboBox(); self.country_combo.setObjectName("countryCombo"); self.country_combo.setMinimumWidth(300); self.country_combo.setMinimumHeight(48); self.country_combo.setAccessibleName("Exit country"); self.country_combo.setCursor(Qt.PointingHandCursor); self.country_combo.setIconSize(QSize(30, 20))
         country_actions.addLayout(source_row); country_actions.addWidget(self.country_combo); country_layout.addLayout(country_actions)
         self._refresh_country_selector()
@@ -2396,100 +2614,34 @@ class MainWindow(QMainWindow):
         self.tune_button.setFixedHeight(42)
         self.activity_layout.setContentsMargins(18 if dense else 30, 0, 18 if dense else 30, 8 if dense else 14)
 
-    def _layout_sni_maker(self):
-        if not hasattr(self, "maker_root"):
-            return
-        dense = self.height() < 790
-        narrow_actions = self.maker_page.width() < 1080
-        self.maker_root.setContentsMargins(
-            *(12, 8, 12, 8) if dense else (24, 16, 24, 14)
-        )
-        self.maker_root.setSpacing(6 if dense else 10)
-        self.maker_header.setFixedHeight(82 if dense else 94)
-        header_layout = self.maker_header.layout()
-        header_layout.setContentsMargins(
-            *(10, 5, 10, 5) if dense else (15, 8, 15, 8)
-        )
-        header_icon = self.maker_header.findChild(QLabel, "pageHeaderIcon")
-        if header_icon is not None:
-            header_icon.setFixedSize(*(40, 40) if dense else (46, 46))
-        maker_title = self.maker_header.findChild(QLabel, "pageTitle")
-        maker_subtitle = self.maker_header.findChild(QLabel, "pageSubtitle")
-        if maker_title is not None:
-            maker_title.setMinimumHeight(35)
-            maker_title.setAlignment(Qt.AlignVCenter)
-        if maker_subtitle is not None:
-            maker_subtitle.setMinimumHeight(20)
-            maker_subtitle.setWordWrap(False)
-        self.maker_source_card.setFixedHeight(128 if dense else 146)
-        self.maker_source_editor.setFixedHeight(70 if dense else 86)
-        self.maker_control.setFixedHeight(60 if dense else 62)
-        self.maker_progress.setFixedHeight(46 if dense else 48)
-        self._layout_maker_actions(narrow_actions)
-        self.maker_actions.setFixedHeight(
-            92 if narrow_actions else 60 if dense else 62
-        )
-        self.maker_table.verticalHeader().setDefaultSectionSize(42 if dense else 45)
-        self.maker_country_rail.setMinimumWidth(0)
-        self.maker_country_rail.setMaximumWidth(16777215)
-        self._position_maker_select_all()
-        _restyle(self.maker_header)
 
-    def _layout_maker_actions(self, compact):
-        compact = bool(compact)
-        if getattr(self, "_maker_actions_compact", None) == compact:
-            return
-        self._maker_actions_compact = compact
-        layout = self.maker_action_layout
-        while layout.count():
-            layout.takeAt(0)
-        for column in range(7):
-            layout.setColumnStretch(column, 0)
-        if compact:
-            layout.addWidget(self.maker_destination_label, 0, 0)
-            layout.addWidget(self.maker_add_selected_btn, 0, 1)
-            layout.addWidget(self.maker_add_country_btn, 0, 2)
-            layout.setColumnStretch(3, 1)
-            layout.addWidget(self.maker_add_all_btn, 1, 0, 1, 2)
-            layout.setColumnStretch(2, 1)
-            layout.addWidget(self.maker_copy_btn, 1, 3)
-            layout.addWidget(self.maker_export_btn, 1, 4)
-            return
-        layout.addWidget(self.maker_destination_label, 0, 0)
-        layout.addWidget(self.maker_add_selected_btn, 0, 1)
-        layout.addWidget(self.maker_add_country_btn, 0, 2)
-        layout.addWidget(self.maker_add_all_btn, 0, 3)
-        layout.setColumnStretch(4, 1)
-        layout.addWidget(self.maker_copy_btn, 0, 5)
-        layout.addWidget(self.maker_export_btn, 0, 6)
 
     def _configs_page(self):
         page = QWidget(); root = QVBoxLayout(page); root.setContentsMargins(34, 28, 34, 26); root.setSpacing(15)
         self.config_count_label = QLabel("0"); self.config_count_label.setObjectName("summaryPill"); self.config_count_label.setAlignment(Qt.AlignCenter)
         root.addWidget(self._page_header("کانفیگ‌ها", "Configs", "مدیریت کامل لینک‌های VLESS و Trojan", "Manage, rank, import and edit VLESS and Trojan profiles", self.config_count_label))
         toolbar = QFrame(); toolbar.setObjectName("pageToolbar"); bar = QHBoxLayout(toolbar); bar.setContentsMargins(12, 10, 12, 10); bar.setSpacing(9)
+        self.account_btn = self._action_button("ورود به حساب", "Sign In", "lock", "secondaryAction")
+        self.account_btn.clicked.connect(self._account_button_clicked)
         self.add_btn = self._action_button("افزودن کانفیگ", "Add Config", "plus", "primaryAction")
         self.clip_btn = self._action_button("ورود از Clipboard", "Import Clipboard", "copy", "secondaryAction")
-        self.sync_btn = self._action_button("دریافت پیشنهادی‌ها", "Sync Suggested", "refresh", "secondaryAction")
         self.clear_user_btn = self._action_button("حذف همه", "Delete All", "trash", "dangerButton")
         self.clear_user_btn.setMaximumWidth(108)
         self.clear_user_btn.setToolTip(self.tr("حذف همه کانفیگ‌های User Config", "Delete every User Config entry"))
-        for widget in (self.add_btn, self.clip_btn, self.sync_btn): bar.addWidget(widget)
+        for widget in (self.account_btn, self.add_btn, self.clip_btn): bar.addWidget(widget)
         bar.addStretch(); bar.addWidget(self.clear_user_btn); root.addWidget(toolbar)
         panel = QFrame(); panel.setObjectName("configPanel"); panel_layout = QVBoxLayout(panel); panel_layout.setContentsMargins(0, 0, 0, 0)
-        self.profile_tabs = QTabWidget(); self.profile_tabs.setObjectName("profileTabs"); self.manual_list = EmptyListWidget("file-cog"); self.user_config_list = EmptyListWidget("sparkles"); self.suggested_list = EmptyListWidget("server")
-        self.manual_list.setObjectName("manualConfigList"); self.user_config_list.setObjectName("userConfigList"); self.suggested_list.setObjectName("suggestedConfigList")
-        for widget in (self.manual_list, self.user_config_list, self.suggested_list):
+        self.profile_tabs = QTabWidget(); self.profile_tabs.setObjectName("profileTabs"); self.manual_list = EmptyListWidget("file-cog"); self.user_config_list = EmptyListWidget("sparkles")
+        self.manual_list.setObjectName("manualConfigList"); self.user_config_list.setObjectName("userConfigList")
+        for widget in (self.manual_list, self.user_config_list):
             widget.setSelectionMode(QAbstractItemView.ExtendedSelection); widget.setSpacing(4); widget.itemSelectionChanged.connect(self._update_config_actions); widget.deleteRequested.connect(self.delete_profile)
-        self.user_config_list.setSpacing(2); self.suggested_list.setSpacing(2)
+        self.user_config_list.setSpacing(2)
         self.manual_list.set_empty_text(self.tr("هنوز کانفیگ دستی ندارید", "No manual configs yet"), self.tr("یک لینک VLESS یا Trojan اضافه یا از Clipboard وارد کنید.", "Add a VLESS or Trojan link, or import one from the clipboard."))
-        self.user_config_list.set_empty_text(self.tr("هنوز User Config ندارید", "No User Configs yet"), self.tr("کانفیگ‌های سالم را از SNI Config Maker به این بخش اضافه کنید.", "Add healthy routes from SNI Config Maker to this library."))
-        self.suggested_list.set_empty_text(self.tr("هنوز پیشنهادی دریافت نشده", "No suggestions downloaded"), self.tr("برای دریافت فهرست پیشنهادی، همگام‌سازی را اجرا کنید.", "Sync the suggested repository to populate this list."))
+        self.user_config_list.set_empty_text(self.tr("هنوز کانفیگی ندارید", "No configs yet"), self.tr("با حساب کیوب‌وی‌پی‌ان وارد شوید تا کانفیگ‌های شما اینجا نمایش داده شود.", "Sign in with your CubeVPN account to see your configs here."))
         self.profile_pages = []
         self.profile_page_layouts = []
         for widget in (
-                self.user_config_list, self.manual_list,
-                self.suggested_list):
+                self.user_config_list, self.manual_list):
             tab_page = QWidget()
             tab_layout = QVBoxLayout(tab_page)
             tab_layout.setContentsMargins(5, 4, 5, 5)
@@ -2550,10 +2702,6 @@ class MainWindow(QMainWindow):
         self.profile_tabs.addTab(
             self.profile_pages[1], self.tr("دستی", "Manual")
         )
-        self.profile_tabs.addTab(
-            self.profile_pages[2],
-            self.tr("پیشنهادی", "Suggested")
-        )
         self.profile_tabs.currentChanged.connect(
             self._update_config_actions
         )
@@ -2571,184 +2719,108 @@ class MainWindow(QMainWindow):
         self._update_config_actions()
         return page
 
-    def _sni_maker_page(self):
-        page = QWidget(); self.maker_page = page; root = QVBoxLayout(page); self.maker_root = root; root.setContentsMargins(24, 16, 24, 14); root.setSpacing(10)
-        self.maker_summary_badge = QLabel(self.tr("۰ سالم از ۰", "0 healthy of 0")); self.maker_summary_badge.setObjectName("summaryPill"); self.maker_summary_badge.setAlignment(Qt.AlignCenter)
-        self.maker_header = self._page_header(
-            "سازنده کانفیگ اس‌ان‌آی", "SNI Config Maker",
-            "تبدیل گروهی، تست زنده مسیر واقعی و مرتب‌سازی دقیق بر اساس کشور خروجی",
-            "Bulk conversion, live end-to-end testing and verified exit-country sorting",
-            self.maker_summary_badge,
-        )
-        root.addWidget(self.maker_header)
+    def _cube_auth_token(self) -> str:
+        return str(self.storage.settings.get("cube_auth_token", "") or "")
 
-        self.maker_source_card = QFrame(); self.maker_source_card.setObjectName("makerSourceCard")
-        source_layout = QVBoxLayout(self.maker_source_card); source_layout.setContentsMargins(10, 6, 10, 6); source_layout.setSpacing(5)
-        repository_row = QHBoxLayout(); repository_row.setSpacing(6)
-        self.maker_source_title = self._bind_text(QLabel(), "افزودن کانفیگ", "1 · Add configs"); self.maker_source_title.setObjectName("makerStepTitle")
-        saved_maker_url = str(self.storage.settings.get("sni_maker_url", "") or "").strip()
-        if not saved_maker_url or saved_maker_url in LEGACY_SNI_MAKER_URLS:
-            saved_maker_url = DEFAULT_SNI_MAKER_URL
-        self.maker_repo_url = QLineEdit(saved_maker_url); self.maker_repo_url.setObjectName("makerRepoUrl"); self.maker_repo_url.setLayoutDirection(Qt.LeftToRight); self.maker_repo_url.setClearButtonEnabled(True)
-        self.maker_repo_btn = self._action_button("دریافت", "Load", "download", "primaryAction")
-        self.maker_repo_reset_btn = self._action_button("پیش‌فرض", "Default", "refresh", "quietButton")
-        self.maker_repo_btn.setMaximumWidth(105); self.maker_repo_reset_btn.setMaximumWidth(100)
-        repository_row.addWidget(self.maker_source_title); repository_row.addWidget(self.maker_repo_url, 1); repository_row.addWidget(self.maker_repo_btn); repository_row.addWidget(self.maker_repo_reset_btn)
-        source_layout.addLayout(repository_row)
+    def _cube_auth_display_name(self) -> str:
+        return str(self.storage.settings.get("cube_auth_display_name", "") or "")
 
-        import_row = QHBoxLayout(); import_row.setSpacing(6)
-        self.maker_import_badge = QLabel(self.tr("آماده دریافت", "Ready")); self.maker_import_badge.setObjectName("selectionText"); self.maker_import_badge.setMinimumWidth(105); self.maker_import_badge.setMaximumWidth(155)
-        self.maker_source_editor = ConfigDropEdit()
-        self.maker_source_editor.textChanged.connect(self._sync_maker_editor_direction)
-        self.maker_source_editor.setPlaceholderText(self.tr(
-            "لینک‌ها را اینجا وارد کنید یا فایل را رها کنید",
-            "Paste links or drop files here",
-        ))
-        self.maker_file_btn = self._action_button("فایل", "File", "folder", "secondaryAction")
-        self.maker_clip_btn = self._action_button("کلیپ‌بورد", "Clipboard", "copy", "secondaryAction")
-        self.maker_text_btn = self._action_button("تبدیل", "Convert", "sparkles", "secondaryAction")
-        self.maker_clear_btn = self._action_button("پاک‌کردن", "Clear", "trash", "dangerButton")
-        for button, width in (
-                (self.maker_file_btn, 90), (self.maker_clip_btn, 105),
-                (self.maker_text_btn, 95), (self.maker_clear_btn, 90)):
-            button.setMaximumWidth(width)
-        import_row.addWidget(self.maker_import_badge); import_row.addWidget(self.maker_source_editor, 1)
-        import_row.addWidget(self.maker_file_btn); import_row.addWidget(self.maker_clip_btn)
-        import_row.addWidget(self.maker_text_btn); import_row.addWidget(self.maker_clear_btn)
-        source_layout.addLayout(import_row)
-        root.addWidget(self.maker_source_card)
+    def _set_cube_auth(self, token: str, user) -> None:
+        self.storage.settings["cube_auth_token"] = token
+        self.storage.settings["cube_auth_identifier"] = user.identifier if user else ""
+        self.storage.settings["cube_auth_display_name"] = user.display_name if user else ""
+        self.storage.save_settings()
+        self._apply_cube_account_button()
 
-        control = QFrame(); self.maker_control = control; control.setObjectName("makerTestBar"); control_layout = QHBoxLayout(control); control_layout.setContentsMargins(8, 6, 8, 6); control_layout.setSpacing(6)
-        threads_label = self._bind_text(QLabel(), "همزمانی", "Workers"); threads_label.setObjectName("fieldLabel")
-        timeout_label = self._bind_text(QLabel(), "مهلت", "Timeout"); timeout_label.setObjectName("fieldLabel")
-        self.maker_threads = NumericInput(48, 4, 64)
-        self.maker_timeout = NumericInput(8, 3, 20, "s")
-        self.maker_threads.setMaximumWidth(120); self.maker_timeout.setMaximumWidth(120)
-        self.maker_start_btn = self._action_button("تست همه کانفیگ‌ها", "2 · Test All", "play", "primaryAction")
-        self.maker_stop_btn = self._action_button("توقف", "Stop", "x-circle", "dangerButton"); self.maker_stop_btn.setEnabled(False)
-        self.maker_start_btn.setMinimumWidth(180); self.maker_start_btn.setMaximumWidth(230); self.maker_stop_btn.setMaximumWidth(85)
-        self.maker_progress = ScanProgressPanel(self.language); self.maker_progress.setMaximum(100); self.maker_progress.setValue(0)
-        self.maker_progress.set_status(self.tr("آماده تست", "Tester ready"), "idle")
-        self.maker_progress.setFormat(self.tr("منتظر کانفیگ", "Waiting for configs"))
-        self.maker_progress.domain.setVisible(False); self.maker_progress.setMinimumWidth(145)
-        self.maker_progress.layout().setContentsMargins(8, 3, 8, 3); self.maker_progress.layout().setSpacing(2)
-        control_layout.addWidget(threads_label); control_layout.addWidget(self.maker_threads)
-        control_layout.addWidget(timeout_label); control_layout.addWidget(self.maker_timeout)
-        control_layout.addWidget(self.maker_progress, 1); control_layout.addWidget(self.maker_start_btn); control_layout.addWidget(self.maker_stop_btn)
-        root.addWidget(control)
+    def _clear_cube_auth(self) -> None:
+        token = self._cube_auth_token()
+        self.storage.settings["cube_auth_token"] = ""
+        self.storage.settings["cube_auth_identifier"] = ""
+        self.storage.settings["cube_auth_display_name"] = ""
+        self.storage.save_settings()
+        self._apply_cube_account_button()
+        if token:
+            threading.Thread(target=lambda: cube_auth.logout(token), name="cube-logout", daemon=True).start()
 
-        results_panel = QFrame(); self.maker_results_panel = results_panel; results_panel.setObjectName("makerResultsPanel"); results_layout = QVBoxLayout(results_panel); results_layout.setContentsMargins(0, 0, 0, 0); results_layout.setSpacing(0)
-        result_toolbar = QFrame(); result_toolbar.setObjectName("makerResultToolbar"); result_bar = QHBoxLayout(result_toolbar); result_bar.setContentsMargins(10, 7, 10, 7); result_bar.setSpacing(8)
-        self.maker_results_title = self._bind_text(QLabel(), "نتایج تست", "3 · Test results"); self.maker_results_title.setObjectName("makerStepTitle")
-        self.maker_search = QLineEdit(); self.maker_search.setObjectName("makerSearch"); self.maker_search.setPlaceholderText(self.tr("جستجو در نتایج…", "Search results…")); self.maker_search.setClearButtonEnabled(True)
-        self.maker_status_filter = QComboBox(); self.maker_status_filter.setObjectName("makerStatusFilter")
-        self.maker_status_filter.addItem(self.tr("همه وضعیت‌ها", "All statuses"), "")
-        self.maker_status_filter.addItem(self.tr("سالم", "Healthy"), "healthy")
-        self.maker_status_filter.addItem(self.tr("ناموفق", "Failed"), "failed")
-        self.maker_status_filter.addItem(self.tr("در حال تست", "Testing"), "testing")
-        result_bar.addWidget(self.maker_results_title); result_bar.addWidget(self.maker_search, 1); result_bar.addWidget(self.maker_status_filter)
-        results_layout.addWidget(result_toolbar)
+    def _apply_cube_account_button(self) -> None:
+        button = getattr(self, "account_btn", None)
+        if button is None:
+            return
+        if self._cube_auth_token():
+            name = self._cube_auth_display_name() or self.tr("حساب من", "My Account")
+            button.setText(self.tr(f"سرویس‌های من ({name})", f"My Services ({name})"))
+            button.setIcon(cyber_icon("server", "#A855F7", 16))
+        else:
+            button.setText(self.tr("ورود به حساب", "Sign In"))
+            button.setIcon(cyber_icon("lock", "#A855F7", 16))
 
-        self.maker_country_rail = CountryRail(); self.maker_country_rail.setLayoutDirection(Qt.LeftToRight); self.maker_country_rail.set_country_counts({}, all_label=self.tr("همه کشورها", "All countries"))
-        results_layout.addWidget(self.maker_country_rail)
-        self.maker_model = MakerResultsModel(parent=self)
-        self.maker_proxy = MakerFilterProxy(self); self.maker_proxy.setSourceModel(self.maker_model)
-        self.maker_table = QTableView(); self.maker_table.setObjectName("makerResultsTable"); self.maker_table.setModel(self.maker_proxy)
-        self.maker_table.setSortingEnabled(True); self.maker_table.sortByColumn(MakerColumns.STATUS, Qt.AscendingOrder)
-        self.maker_table.setSelectionBehavior(QAbstractItemView.SelectRows); self.maker_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.maker_table.setEditTriggers(QAbstractItemView.NoEditTriggers); self.maker_table.setAlternatingRowColors(True); self.maker_table.setShowGrid(False)
-        self.maker_table.verticalHeader().hide(); self.maker_table.verticalHeader().setDefaultSectionSize(43)
-        maker_header = self.maker_table.horizontalHeader(); maker_header.setHighlightSections(False); maker_header.setStretchLastSection(True)
-        maker_header.setSectionResizeMode(MakerColumns.MARK, QHeaderView.Fixed); self.maker_table.setColumnWidth(MakerColumns.MARK, 42)
-        for column, width in ((MakerColumns.COUNTRY, 90), (MakerColumns.STATUS, 100), (MakerColumns.PING, 90)):
-            maker_header.setSectionResizeMode(column, QHeaderView.Fixed); self.maker_table.setColumnWidth(column, width)
-        maker_header.setSectionResizeMode(MakerColumns.URI, QHeaderView.Stretch)
-        self.maker_select_all_checkbox = QCheckBox(maker_header)
-        self.maker_select_all_checkbox.setObjectName("makerSelectAll")
-        self.maker_select_all_checkbox.setLayoutDirection(Qt.LeftToRight)
-        self.maker_select_all_checkbox.setFixedSize(22, 22)
-        self.maker_select_all_checkbox.setEnabled(False)
-        self.maker_select_all_checkbox.setAccessibleName("Select all configurations")
-        self.maker_select_all_checkbox.setToolTip(self.tr("انتخاب یا لغو انتخاب همه کانفیگ‌ها", "Select or clear all configurations"))
-        maker_header.geometriesChanged.connect(self._position_maker_select_all)
-        maker_header.sectionResized.connect(lambda *_args: self._position_maker_select_all())
-        QTimer.singleShot(0, self._position_maker_select_all)
-        results_layout.addWidget(self.maker_table, 1); root.addWidget(results_panel, 1)
+    def _account_button_clicked(self) -> None:
+        if self._cube_auth_token():
+            self._open_cube_services()
+        else:
+            self._open_cube_login()
 
-        actions = QFrame(); self.maker_actions = actions; actions.setObjectName("makerActionBar"); action_layout = QGridLayout(actions); self.maker_action_layout = action_layout; action_layout.setContentsMargins(10, 7, 10, 7); action_layout.setSpacing(8)
-        self.maker_destination_label = self._bind_text(QLabel(), "← کانفیگ کاربر", "→ User Config"); self.maker_destination_label.setObjectName("makerDestination"); self.maker_destination_label.setMaximumWidth(125)
-        self.maker_add_selected_btn = self._action_button("افزودن", "Add", "plus", "primaryAction")
-        self.maker_add_country_btn = self._action_button("افزودن کانفیگ‌های سالم کشور انتخاب‌شده", "Add Healthy Configs from Selected Country", "database", "secondaryAction")
-        self.maker_add_all_btn = self._action_button("افزودن همه کانفیگ‌های سالم", "Add All Healthy Configs", "download", "secondaryAction")
-        self.maker_copy_btn = self._action_button("کپی", "Copy", "copy", "quietButton")
-        self.maker_export_btn = self._action_button("خروجی", "Export", "upload", "quietButton")
-        for button, width in (
-                (self.maker_add_selected_btn, 95), (self.maker_add_country_btn, 255),
-                (self.maker_add_all_btn, 210), (self.maker_copy_btn, 85),
-                (self.maker_export_btn, 90)):
-            button.setMinimumWidth(width)
-            button.setMaximumWidth(16777215)
-            button.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
-        self.maker_add_selected_btn.setToolTip(self.tr("افزودن انتخاب‌ها به کانفیگ کاربر", "Add marked configs to User Config"))
-        self.maker_add_country_btn.setToolTip(self.tr("افزودن سالم‌های کشور انتخاب‌شده", "Add healthy configs from the selected country"))
-        self.maker_add_all_btn.setToolTip(self.tr("افزودن همه کانفیگ‌های سالم", "Add every healthy config"))
-        self._maker_actions_compact = None
-        self._layout_maker_actions(False)
-        for button in (self.maker_add_selected_btn, self.maker_add_country_btn, self.maker_add_all_btn, self.maker_copy_btn, self.maker_export_btn):
-            button.setEnabled(False)
-        root.addWidget(actions)
-        return page
+    def _open_cube_login(self) -> None:
+        dialog = CubeLoginDialog(self, self.language)
+        if dialog.exec() == QDialog.Accepted and dialog.token:
+            self._set_cube_auth(dialog.token, dialog.user)
+            self.show_toast(self.tr("ورود موفق بود", "Signed in successfully"), "success")
+            self._open_cube_services()
 
-    def _scanner_page(self):
-        page, body = self._scroll_page(); root = QVBoxLayout(body); root.setContentsMargins(30, 25, 30, 24); root.setSpacing(14)
-        self.scan_state_badge = QLabel(); self.scan_state_badge.setObjectName("summaryPill"); self._bind_text(self.scan_state_badge, "آماده اسکن", "Scanner Ready")
-        root.addWidget(self._page_header("آزمایشگاه اس‌ان‌آی", "SNI Lab", "اسکن همزمان، امتیازدهی پایداری و ذخیره بهترین مسیرها", "Discover, measure and rank reliable SNI routes", self.scan_state_badge))
-        controls = QFrame(); controls.setObjectName("scanControlCard"); controls.setMinimumHeight(214); c = QGridLayout(controls); c.setContentsMargins(18, 16, 18, 16); c.setHorizontalSpacing(18); c.setVerticalSpacing(12)
-        domain_panel = QFrame(); domain_panel.setObjectName("domainPanel"); domain_box = QVBoxLayout(domain_panel); domain_box.setContentsMargins(0, 0, 0, 0); domain_box.setSpacing(7); domain_title = self._bind_text(QLabel(), "دامنه‌های هدف", "DOMAIN TARGETS"); domain_title.setObjectName("sectionEyebrow")
-        domain_help = self._bind_text(QLabel(), "در هر خط یک دامنه؛ فهرست‌ها به‌صورت همزمان بررسی می‌شوند.", "One hostname per line • long lists are scanned concurrently"); domain_help.setObjectName("helperText"); domain_help.setWordWrap(True)
-        self.domains = QPlainTextEdit(); self.domains.setObjectName("domainEditor"); self.domains.setPlaceholderText("example.com\ncdn.example.net"); self.domains.setMinimumHeight(116)
-        try: self.domains.setPlainText("\n".join((ASSETS / "domains.txt").read_text(encoding="utf-8").splitlines()[:80]))
-        except OSError: pass
-        domain_box.addWidget(domain_title); domain_box.addWidget(domain_help); domain_box.addWidget(self.domains, 1); c.addWidget(domain_panel, 0, 0)
-        options = QFrame(); options.setObjectName("scanOptions"); option_layout = QVBoxLayout(options); option_layout.setContentsMargins(15, 13, 15, 13); option_layout.setSpacing(10)
-        option_title = self._bind_text(QLabel(), "پروفایل اسکن", "SCAN PROFILE"); option_title.setObjectName("sectionEyebrow"); option_layout.addWidget(option_title)
-        option_grid = QGridLayout(); option_grid.setHorizontalSpacing(10); option_grid.setVerticalSpacing(9)
-        self.scan_threads = NumericInput(30, 1, 100); self.scan_tries = NumericInput(3, 1, 10); self.scan_timeout = NumericInput(12, 2, 60, "s")
-        for row, (fa, en, widget) in enumerate((("رشته‌ها", "Threads", self.scan_threads), ("تلاش", "Attempts", self.scan_tries), ("مهلت", "Timeout", self.scan_timeout))):
-            label = self._bind_text(QLabel(), fa, en); label.setObjectName("fieldLabel"); option_grid.addWidget(label, row, 0); option_grid.addWidget(widget, row, 1)
-        option_layout.addLayout(option_grid); option_layout.addStretch()
-        self.scan_button = self._action_button("شروع اسکن", "Start Scan", "play", "scanPrimaryButton"); self.scan_button.setMinimumHeight(48); option_layout.addWidget(self.scan_button)
-        c.addWidget(options, 0, 1); c.setColumnStretch(0, 3); c.setColumnStretch(1, 2); root.addWidget(controls)
+    def _open_cube_services(self) -> None:
+        token = self._cube_auth_token()
+        if not token:
+            self._open_cube_login()
+            return
+        self.account_btn.setEnabled(False)
 
-        self.scan_progress = ScanProgressPanel(self.language); self.scan_progress.setValue(0); root.addWidget(self.scan_progress)
-        self.scan_tabs = QTabWidget(); self.scan_tabs.setObjectName("scannerTabs"); self.scan_tabs.setMinimumHeight(180); self.results_table = self._result_table(); self.bookmarks_table = self._result_table(); self.scan_tabs.addTab(self.results_table, "نتایج"); self.scan_tabs.addTab(self.bookmarks_table, "ذخیره‌شده"); root.addWidget(self.scan_tabs, 1)
-        action_bar = QFrame(); action_bar.setObjectName("sniActionBar"); action_bar.setMinimumHeight(122); actions = QVBoxLayout(action_bar); actions.setContentsMargins(12, 10, 12, 10); actions.setSpacing(8)
-        utility_row = QHBoxLayout(); apply_row = QHBoxLayout(); utility_row.setSpacing(8); apply_row.setSpacing(8)
-        self.scan_selection_label = self._bind_text(QLabel(), "هیچ ردیفی انتخاب نشده", "No rows selected"); self.scan_selection_label.setObjectName("selectionText"); utility_row.addWidget(self.scan_selection_label); utility_row.addStretch()
-        self.copy_result_btn = self._action_button("کپی نتیجه", "Copy Result", "copy", "quietButton")
-        self.bookmark_btn = self._action_button("ذخیره نتیجه", "Save Result", "database", "quietButton")
-        self.undo_apply_btn = self._action_button("بازگردانی آخرین اعمال", "Undo Last Apply", "refresh", "quietButton"); self.undo_apply_btn.setEnabled(False)
-        self.apply_sni_btn = self._action_button("اعمال SNI به کانفیگ فعال", "Apply SNI to Active Config", "route", "secondaryAction")
-        self.apply_all_sni_btn = self._action_button("اعمال SNI به همه پیشنهادها", "Apply SNI to All Suggested Configs", "network", "primaryAction")
-        for widget in (self.copy_result_btn, self.bookmark_btn, self.undo_apply_btn): utility_row.addWidget(widget)
-        apply_row.addStretch(); apply_row.addWidget(self.apply_sni_btn); apply_row.addWidget(self.apply_all_sni_btn)
-        actions.addLayout(utility_row); actions.addLayout(apply_row)
-        root.addWidget(action_bar)
-        return page
+        def work():
+            result = cube_auth.fetch_account(token)
+            self._cube_account_worker.done.emit(result)
 
-    def _result_table(self):
-        table = QTableWidget(0, 9); table.setObjectName("resultsTable"); table.setHorizontalHeaderLabels(["", "Domain", "IP", "Colo", "Ping", "Stability", "First byte", "Bytes/2s", "Score"])
-        header = table.horizontalHeader(); header.setSectionsClickable(True); header.setSortIndicatorShown(True); header.setHighlightSections(False)
-        header.setSectionResizeMode(0, QHeaderView.Fixed); table.setColumnWidth(0, 42)
-        header.setSectionResizeMode(1, QHeaderView.Stretch); table.setColumnWidth(1, 300)
-        header.setSectionResizeMode(2, QHeaderView.Interactive); table.setColumnWidth(2, 138)
-        for column, width in {3: 78, 4: 104, 5: 112, 6: 118, 7: 118, 8: 92}.items():
-            header.setSectionResizeMode(column, QHeaderView.Fixed); table.setColumnWidth(column, width)
-        table.verticalHeader().hide(); table.verticalHeader().setDefaultSectionSize(48); table.setShowGrid(False); table.setAlternatingRowColors(True); table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
-        table.setSelectionBehavior(QAbstractItemView.SelectRows); table.setSelectionMode(QAbstractItemView.ExtendedSelection); table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        header.setSortIndicator(8, Qt.DescendingOrder)
-        table.setSortingEnabled(True); table.itemSelectionChanged.connect(self._update_scan_selection)
-        return table
+        threading.Thread(target=work, name="cube-fetch-account", daemon=True).start()
+
+    def _on_cube_account_fetched(self, result) -> None:
+        self.account_btn.setEnabled(True)
+        if isinstance(result, cube_auth.AccountOk):
+            if result.user.display_name and result.user.display_name != self._cube_auth_display_name():
+                self.storage.settings["cube_auth_display_name"] = result.user.display_name
+                self.storage.save_settings()
+                self._apply_cube_account_button()
+            CubeServicesDialog(self, result.services, self.language).exec()
+        else:
+            self.show_toast(result.message, "danger")
+
+    def _cube_sign_out(self) -> None:
+        self._clear_cube_auth()
+        self.show_toast(self.tr("از حساب خارج شدید", "Signed out"), "success")
+
+    def _import_cube_service(self, service, callback) -> None:
+        def work():
+            ok = False
+            try:
+                uris = cube_auth.fetch_subscription_uris(service.subscription_url)
+                profiles = [p for p in parse_many("\n".join(uris)) if p]
+                for profile in profiles:
+                    profile.origin = USER_CONFIG_ORIGIN
+                if profiles:
+                    known = {p.source_uri for p in self.storage.profiles}
+                    added = [p for p in profiles if p.source_uri not in known]
+                    if added:
+                        self.storage.profiles.extend(added)
+                        self.storage.save_profiles()
+                    ok = True
+            except Exception:
+                ok = False
+            self._cube_import_worker.done.emit(callback, ok)
+
+        threading.Thread(target=work, name="cube-import-service", daemon=True).start()
+
+    def _on_cube_import_done(self, callback, ok) -> None:
+        if ok:
+            self.refresh_profiles()
+        if callable(callback):
+            callback(ok)
 
     def _logs_page(self):
         page = QWidget(); root = QVBoxLayout(page); root.setContentsMargins(34, 28, 34, 26); root.setSpacing(14)
@@ -2840,20 +2912,8 @@ class MainWindow(QMainWindow):
         root.addLayout(info_grid); credits = QLabel(f"CubeVPN {__version__}  •  based on UAC Spoofer Desktop by Floxu1 & Patterniha"); credits.setObjectName("credits"); credits.setAlignment(Qt.AlignCenter); credits.setLayoutDirection(Qt.LeftToRight); root.addWidget(credits); root.addStretch(); return page
 
     def _wire(self):
-        self.bridge.log.connect(self._append_log); self.bridge.state.connect(self._set_state); self.bridge.traffic.connect(self._set_traffic); self.bridge.latency.connect(self._set_latency); self.bridge.target_latency.connect(self._target_latency_finished); self.bridge.maker_imported.connect(self._maker_import_finished); self.bridge.maker_batch.connect(self._maker_test_batch); self.bridge.maker_done.connect(self._maker_test_done); self.bridge.maker_failed.connect(self._maker_failed); self.bridge.scan_progress.connect(self._scan_progress); self.bridge.scan_done.connect(self._scan_done); self.bridge.scan_failed.connect(self._scan_failed); self.bridge.error.connect(self._handle_error); self.bridge.profiles_changed.connect(self.refresh_profiles); self.bridge.profile_pings_done.connect(self._profile_pings_finished); self.bridge.ip.connect(self._ip_checked); self.bridge.hint.connect(self.connection_hint.setText); self.bridge.activity.connect(self.activity_bar.set_activity); self.bridge.processes.connect(self._populate_processes); self.bridge.update_checked.connect(self._update_checked); self.bridge.update_failed.connect(self._update_failed); self.bridge.proxy_mode_applied.connect(self._proxy_mode_apply_finished); self.bridge.tun_mode_applied.connect(self._tun_mode_apply_finished); self.bridge.gateway_mode_applied.connect(self._gateway_mode_apply_finished); self.bridge.gateway_runtime_state.connect(self._gateway_runtime_state_changed); self.bridge.gateway_devices_changed.connect(self._gateway_devices_updated)
-        self.connect_button.clicked.connect(self.toggle_connection); self.add_btn.clicked.connect(self.add_profile); self.clear_user_btn.clicked.connect(self.delete_all_user_configs); self.clip_btn.clicked.connect(self.import_clipboard); self.sync_btn.clicked.connect(self.sync_profiles); self.scan_button.clicked.connect(self.toggle_scan); self.bookmark_btn.clicked.connect(self.bookmark_selected); self.apply_sni_btn.clicked.connect(self.apply_selected_sni); self.apply_all_sni_btn.clicked.connect(self.apply_sni_to_all_suggested); self.undo_apply_btn.clicked.connect(self.undo_sni_apply); self.copy_result_btn.clicked.connect(self.copy_selected_result); self.carrier.currentTextChanged.connect(self._carrier_changed); self.country_combo.activated.connect(self._country_activated); self.auto_mode.toggled.connect(self._auto_mode_changed); self.pick_best.toggled.connect(lambda v: self._save_flag("pick_best", v)); self.proxy_mode.toggled.connect(self._proxy_mode_changed); self.tun_mode.toggled.connect(self._tun_mode_changed); self.gateway_mode.toggled.connect(self._gateway_mode_changed)
-        self.scan_tabs.currentChanged.connect(self._update_scan_selection)
-        self.route_source_tabs.currentChanged.connect(self._route_source_changed)
-        self.maker_repo_btn.clicked.connect(self._maker_fetch_repository); self.maker_repo_reset_btn.clicked.connect(lambda: self.maker_repo_url.setText(DEFAULT_SNI_MAKER_URL)); self.maker_repo_url.textChanged.connect(self._maker_repo_url_changed)
-        self.maker_file_btn.clicked.connect(self._maker_import_files); self.maker_clip_btn.clicked.connect(self.maker_source_editor.paste_from_clipboard); self.maker_text_btn.clicked.connect(lambda: self._maker_import_text(self.maker_source_editor.toPlainText(), "editor")); self.maker_clear_btn.clicked.connect(self._maker_clear)
-        self.maker_source_editor.textChanged.connect(self._maker_editor_changed)
-        self.maker_source_editor.payloadAdded.connect(lambda *_args: self._update_maker_guide())
-        self.maker_start_btn.clicked.connect(self._maker_start_test); self.maker_stop_btn.clicked.connect(self._maker_stop_test)
-        self.maker_search.textChanged.connect(self.maker_proxy.set_search); self.maker_status_filter.currentIndexChanged.connect(lambda _index: self.maker_proxy.set_statuses(self.maker_status_filter.currentData()))
-        self.maker_country_rail.countrySelected.connect(self.maker_proxy.set_country); self.maker_model.summaryChanged.connect(self._maker_summary_changed)
-        self.maker_select_all_checkbox.clicked.connect(self.maker_model.set_all_checked)
-        self.maker_add_selected_btn.clicked.connect(lambda: self._maker_add_results("selected")); self.maker_add_country_btn.clicked.connect(lambda: self._maker_add_results("country")); self.maker_add_all_btn.clicked.connect(lambda: self._maker_add_results("all"))
-        self.maker_copy_btn.clicked.connect(self._maker_copy_marked); self.maker_export_btn.clicked.connect(self._maker_export_healthy)
+        self.bridge.log.connect(self._append_log); self.bridge.state.connect(self._set_state); self.bridge.traffic.connect(self._set_traffic); self.bridge.latency.connect(self._set_latency); self.bridge.target_latency.connect(self._target_latency_finished); self.bridge.error.connect(self._handle_error); self.bridge.profiles_changed.connect(self.refresh_profiles); self.bridge.profile_pings_done.connect(self._profile_pings_finished); self.bridge.ip.connect(self._ip_checked); self.bridge.hint.connect(self.connection_hint.setText); self.bridge.activity.connect(self.activity_bar.set_activity); self.bridge.processes.connect(self._populate_processes); self.bridge.update_checked.connect(self._update_checked); self.bridge.update_failed.connect(self._update_failed); self.bridge.proxy_mode_applied.connect(self._proxy_mode_apply_finished); self.bridge.tun_mode_applied.connect(self._tun_mode_apply_finished); self.bridge.gateway_mode_applied.connect(self._gateway_mode_apply_finished); self.bridge.gateway_runtime_state.connect(self._gateway_runtime_state_changed); self.bridge.gateway_devices_changed.connect(self._gateway_devices_updated)
+        self.connect_button.clicked.connect(self.toggle_connection); self.add_btn.clicked.connect(self.add_profile); self.clear_user_btn.clicked.connect(self.delete_all_user_configs); self.clip_btn.clicked.connect(self.import_clipboard); self.carrier.currentTextChanged.connect(self._carrier_changed); self.country_combo.activated.connect(self._country_activated); self.auto_mode.toggled.connect(self._auto_mode_changed); self.pick_best.toggled.connect(lambda v: self._save_flag("pick_best", v)); self.proxy_mode.toggled.connect(self._proxy_mode_changed); self.tun_mode.toggled.connect(self._tun_mode_changed); self.gateway_mode.toggled.connect(self._gateway_mode_changed)
 
     def _setup_tray(self):
         if not QSystemTrayIcon.isSystemTrayAvailable():
@@ -2981,10 +3041,6 @@ class MainWindow(QMainWindow):
             self._animated_page.setGraphicsEffect(None)
             self._animated_page = None
         self.stack.setCurrentIndex(index)
-        if index == 2:
-            self._layout_sni_maker()
-            QTimer.singleShot(0, self._layout_sni_maker)
-            QTimer.singleShot(120, self._layout_sni_maker)
         for i, button in enumerate(self.nav):
             active = i == index
             button.setChecked(active)
@@ -3036,7 +3092,6 @@ class MainWindow(QMainWindow):
             self.connection_error = str(message)
             self.connecting = False
             self._set_connection_visual("error")
-        self.sync_btn.setEnabled(True)
         self.ip_button.setEnabled(True)
         self.process_refresh_btn.setEnabled(True)
         self.activity_bar.set_activity(str(message), "error", False)
@@ -3049,8 +3104,7 @@ class MainWindow(QMainWindow):
 
     def _configure_technical_widgets(self):
         widgets = [self.route_detail, self.ping_label, self.up_label, self.down_label, self.ip_label,
-                   self.logs, self.domains, self.carrier, self.log_filter, self.process_search,
-                   self.maker_repo_url, self.maker_search]
+                   self.logs, self.carrier, self.log_filter, self.process_search]
         for widget in widgets:
             widget.setLayoutDirection(Qt.LeftToRight)
             widget.setProperty("technical", True)
@@ -3058,17 +3112,9 @@ class MainWindow(QMainWindow):
 
 
         table_direction = Qt.LeftToRight if self.language == "en" else Qt.RightToLeft
-        for table in (self.results_table, self.bookmarks_table, self.process_table):
-            table.setLayoutDirection(table_direction)
-            table.setProperty("technical", True)
-        self.maker_table.setLayoutDirection(Qt.LeftToRight)
-        self.maker_table.setProperty("technical", True)
+        self.process_table.setLayoutDirection(table_direction)
+        self.process_table.setProperty("technical", True)
 
-    def _sync_maker_editor_direction(self):
-        persian_placeholder = self.language == "fa" and not self.maker_source_editor.toPlainText().strip()
-        self.maker_source_editor.setLayoutDirection(
-            Qt.RightToLeft if persian_placeholder else Qt.LeftToRight
-        )
 
     def _sync_sidebar_language_layout(self):
         rtl = self.language == "fa"
@@ -3132,70 +3178,14 @@ class MainWindow(QMainWindow):
                 item = table.horizontalHeaderItem(column)
                 if item and item.text() in mapping:
                     item.setText(mapping[item.text()])
-        self.profile_tabs.setTabText(0, "User Config"); self.profile_tabs.setTabText(1, self.tr("دستی", "Manual")); self.profile_tabs.setTabText(2, self.tr("پیشنهادی", "Suggested"))
+        self.profile_tabs.setTabText(0, "User Config"); self.profile_tabs.setTabText(1, self.tr("دستی", "Manual"))
         self.profile_select_all_checkbox.setToolTip(self.tr(
             "انتخاب یا لغو انتخاب همه کانفیگ‌های لیست فعال",
             "Select or clear every configuration in the active list",
         ))
         self._sync_profile_sort_control()
         self._position_profile_select_all()
-        self.route_source_tabs.setTabText(0, self.tr("پیشنهادی", "Suggested")); self.route_source_tabs.setTabText(1, "User Config")
-        self.scan_tabs.setTabText(0, self.tr("نتایج", "Results")); self.scan_tabs.setTabText(1, self.tr("ذخیره‌شده", "Saved"))
-        result_headers = (["", "Domain", "IP", "Colo", "Ping", "Stability", "First byte", "Bytes/2s", "Score"] if self.language == "en" else ["", "دامنه", "IP", "Colo", "پینگ", "پایداری", "اولین بایت", "بایت/۲ثانیه", "امتیاز"])
-        for table in (self.results_table, self.bookmarks_table): table.setHorizontalHeaderLabels(result_headers)
         self.process_table.setHorizontalHeaderLabels([self.tr(f"خارج از {ltr_isolate('VPN')}", "Bypass VPN"), self.tr("پردازه", "Process")])
-        self.maker_model.set_headers(
-            ["", "Country", "Status", "Real ping", "Configuration"]
-            if self.language == "en"
-            else ["", "کشور", "وضعیت", "پینگ واقعی", "کانفیگ"]
-        )
-        self.maker_model.set_status_labels(
-            {} if self.language == "en" else {
-                "queued": "در صف",
-                "ready": "آماده",
-                "converted": "تبدیل‌شده",
-                "converting": "در حال تبدیل",
-                "testing": "در حال تست",
-                "healthy": "سالم",
-                "failed": "ناموفق",
-                "invalid": "نامعتبر",
-                "skipped": "ناسازگار",
-                "cancelled": "متوقف‌شده",
-            }
-        )
-        self.maker_source_editor.setPlaceholderText(self.tr(
-            "لینک‌ها را اینجا وارد کنید یا فایل را رها کنید",
-            "Paste links or drop files here",
-        ))
-        self._sync_maker_editor_direction()
-        if self.maker_model.rowCount() == 0:
-            self.maker_import_badge.setText(self.tr("آماده دریافت", "Ready"))
-            self.maker_progress.set_status(self.tr("آماده تست", "Tester ready"), "idle")
-            self.maker_progress.setFormat(self.tr("منتظر کانفیگ", "Waiting for configs"))
-        self.maker_search.setPlaceholderText(self.tr("جستجو در نتایج…", "Search results…"))
-        self.maker_select_all_checkbox.setToolTip(self.tr(
-            "انتخاب یا لغو انتخاب همه کانفیگ‌ها",
-            "Select or clear all configurations",
-        ))
-        for index, (persian, english) in enumerate((
-                ("همه وضعیت‌ها", "All statuses"),
-                ("سالم", "Healthy"),
-                ("ناموفق", "Failed"),
-                ("در حال تست", "Testing"))):
-            self.maker_status_filter.setItemText(
-                index, english if self.language == "en" else persian
-            )
-        self.maker_country_rail.set_metric_labels(
-            self.tr("سالم", "healthy"),
-            self.tr("کل", "total"),
-            self.tr("زنده", "live"),
-        )
-        self._maker_last_country_summary = None
-        self._maker_summary_changed({
-            "total": self.maker_model.rowCount(),
-            "statuses": self.maker_model.status_counts(),
-            "countries": self.maker_model.country_summary(),
-        })
         for index, (button, (icon_name, persian, english)) in enumerate(zip(self.nav, self.nav_meta)):
             button.setText(english if self.language == "en" else persian)
             button.setProperty("rtl", self.language != "en"); _restyle(button)
@@ -3206,15 +3196,14 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._sync_sidebar_language_layout)
         self._update_tray_text()
         self.status_pill.set_language(self.language); self.activity_bar.set_language(self.language)
-        if not self.scanning: self.scan_progress.set_language(self.language)
         if self._latest_update:
             self._render_update_info(self._latest_update)
         elif not self._update_in_progress:
             self.update_status.setText(self.tr("برای بررسی نسخه آماده است", "Ready to check for updates"))
             self.update_versions.setText(self.tr(f"نصب‌شده: {ltr_isolate(__version__)}  •  آخرین نسخه: —", f"Installed: {__version__}  •  Latest: —"))
         self.manual_list.set_empty_text(self.tr("هنوز کانفیگ دستی ندارید", "No manual configs yet"), self.tr("یک لینک VLESS یا Trojan اضافه یا از Clipboard وارد کنید.", "Add a VLESS or Trojan link, or import one from the clipboard."))
-        self.user_config_list.set_empty_text(self.tr("هنوز User Config ندارید", "No User Configs yet"), self.tr("کانفیگ‌های سالم را از SNI Config Maker به این بخش اضافه کنید.", "Add healthy routes from SNI Config Maker to this library."))
-        self.suggested_list.set_empty_text(self.tr("هنوز پیشنهادی دریافت نشده", "No suggestions downloaded"), self.tr("برای دریافت فهرست پیشنهادی، همگام‌سازی را اجرا کنید.", "Sync the suggested repository to populate this list."))
+        self.user_config_list.set_empty_text(self.tr("هنوز کانفیگی ندارید", "No configs yet"), self.tr("با حساب کیوب‌وی‌پی‌ان وارد شوید تا کانفیگ‌های شما اینجا نمایش داده شود.", "Sign in with your CubeVPN account to see your configs here."))
+        self._apply_cube_account_button()
         self.log_filter.setPlaceholderText(self.tr("فیلتر لاگ‌ها…", "Filter logs…")); self.process_search.setPlaceholderText(self.tr("جستجوی پردازه…", "Search processes…"))
         self._update_process_count()
         self._set_log_count(len(self._all_log_lines))
@@ -3227,10 +3216,6 @@ class MainWindow(QMainWindow):
             self._set_connection_visual("error")
         else:
             self._set_state(self.engine.running)
-        if self.scanning:
-            self.scan_button.setText(self.tr("توقف اسکن", "Stop Scan"))
-        else:
-            self.scan_button.setText(self.tr("شروع اسکن", "Start Scan"))
         self._refresh_country_selector()
         self._sync_auto_mode_ui(select_profile=True)
         self.proxy_mode.setToolTip(self.tr(
@@ -3250,12 +3235,9 @@ class MainWindow(QMainWindow):
         self._sync_gateway_controls()
         self._configure_technical_widgets()
         self._layout_home_dashboard()
-        self._layout_sni_maker()
         if self._update_notification is not None and self._latest_update is not None:
             self._show_update_notification(self._latest_update)
         self.refresh_profiles()
-        self._update_scan_selection()
-        self._maker_repo_url_changed()
 
     def _save_flag(self, key, value): self.storage.settings[key] = value; self.storage.save_settings()
 
@@ -3313,8 +3295,7 @@ class MainWindow(QMainWindow):
 
     def _set_profile_list_selection(self, widget, checked):
         if widget not in (
-                self.user_config_list, self.manual_list,
-                self.suggested_list):
+                self.user_config_list, self.manual_list):
             return
         widget.blockSignals(True)
         try:
@@ -3346,14 +3327,12 @@ class MainWindow(QMainWindow):
         index = self.profile_tabs.currentIndex()
         widgets = (
             self.user_config_list, self.manual_list,
-            self.suggested_list,
         )
         return widgets[index] if 0 <= index < len(widgets) else None
 
     def _profile_tab_index(self, widget):
         widgets = (
             self.user_config_list, self.manual_list,
-            self.suggested_list,
         )
         try:
             return widgets.index(widget)
@@ -3366,8 +3345,6 @@ class MainWindow(QMainWindow):
             return "user-config"
         if widget is self.manual_list:
             return "manual"
-        if widget is self.suggested_list:
-            return "suggested"
         return ""
 
     def _profiles_for_list_key(self, key):
@@ -3380,11 +3357,6 @@ class MainWindow(QMainWindow):
             return [
                 profile for profile in self.storage.profiles
                 if profile.origin == "user"
-            ]
-        if key == "suggested":
-            return [
-                profile for profile in self.storage.profiles
-                if profile.origin not in DIRECT_PROFILE_ORIGINS
             ]
         return []
 
@@ -3529,8 +3501,7 @@ class MainWindow(QMainWindow):
             return
         widget = self._current_profile_list()
         if widget not in (
-                self.user_config_list, self.manual_list,
-                self.suggested_list):
+                self.user_config_list, self.manual_list):
             bar.hide()
             return
         index = self.profile_tabs.currentIndex()
@@ -4375,11 +4346,7 @@ class MainWindow(QMainWindow):
         return value if value in COUNTRIES or value in available or value in known else ""
 
     def _selected_route_source(self) -> str:
-        tabs = getattr(self, "route_source_tabs", None)
-        if tabs is not None:
-            return "user-config" if tabs.currentIndex() == 1 else "suggested"
-        value = str(self.storage.settings.get("route_source", "suggested") or "suggested").lower()
-        return "user-config" if value == "user-config" else "suggested"
+        return "user-config"
 
     def _route_source_profiles(self, verified_only=False):
         source = self._selected_route_source()
@@ -4605,7 +4572,6 @@ class MainWindow(QMainWindow):
     def _profile_tab_changed(self, index):
         widget = (
             self.user_config_list, self.manual_list,
-            self.suggested_list,
         )[index]
         self._sync_profile_sort_control()
         self._position_profile_select_all()
@@ -4677,7 +4643,6 @@ class MainWindow(QMainWindow):
     def _sync_auto_mode_ui(self, select_profile=False):
         enabled = self.auto_mode.isChecked()
         self.country_combo.setEnabled(enabled)
-        self.route_source_tabs.setEnabled(enabled)
         self.manual_option.setEnabled(not enabled)
         self.country_card.setProperty("mode", "auto" if enabled else "manual")
         _restyle(self.country_card)
@@ -4690,11 +4655,7 @@ class MainWindow(QMainWindow):
         if select_profile:
             if enabled:
                 self.profile_tabs.setCurrentIndex(
-                    self._profile_tab_index(
-                        self.user_config_list
-                        if self._selected_route_source() == "user-config"
-                        else self.suggested_list
-                    )
+                    self._profile_tab_index(self.user_config_list)
                 )
             else:
                 direct_index = self._profile_tab_index(
@@ -4839,26 +4800,14 @@ class MainWindow(QMainWindow):
             MainWindow._remember_direct_profile(self, profile)
         if switch_active:
             self._queue_profile_switch(profile.id)
-        route_tabs = getattr(self, "route_source_tabs", None)
-        route_index = None
         if profile.origin == USER_CONFIG_ORIGIN:
             self.storage.settings["route_source"] = "user-config"
-            route_index = 1
-        elif profile.origin not in DIRECT_PROFILE_ORIGINS:
-            self.storage.settings["route_source"] = "suggested"
-            route_index = 0
-        if route_tabs is not None and route_index is not None:
-            blocked = route_tabs.blockSignals(True)
-            route_tabs.setCurrentIndex(route_index)
-            route_tabs.blockSignals(blocked)
         save_settings = getattr(self.storage, "save_settings", None)
         if callable(save_settings):
             save_settings()
         widget = (
             self.manual_list if profile.origin == "user"
             else self.user_config_list
-            if profile.origin == USER_CONFIG_ORIGIN
-            else self.suggested_list
         )
         self.profile_tabs.setCurrentIndex(self._profile_tab_index(widget))
         self.refresh_profiles()
@@ -4880,9 +4829,8 @@ class MainWindow(QMainWindow):
         self.edit_profile(profile.id)
 
     def refresh_profiles(self):
-        self.manual_list.clear(); self.user_config_list.clear(); self.suggested_list.clear()
+        self.manual_list.clear(); self.user_config_list.clear()
         self._refresh_country_selector()
-        self.sync_btn.setEnabled(True)
         carrier = self.storage.tuning.carrier_mode
         benchmarks = self.storage.settings.get(f"profile_benchmarks_pattern_{carrier}", {})
         benchmarks = benchmarks if isinstance(benchmarks, dict) else {}
@@ -5011,8 +4959,7 @@ class MainWindow(QMainWindow):
                 item.setToolTip(f"Patterniha real test · Fake SNI {benchmark.get('fake_sni', '—')} · {startup_label} {float(benchmark.get('startup_ms', 0)):.0f} ms · {quality_tip} · strategy={benchmark.get('strategy', 'wrong_seq')}")
             target = (
                 self.manual_list if profile.origin == "user"
-                else self.user_config_list if profile.origin == USER_CONFIG_ORIGIN
-                else self.suggested_list
+                else self.user_config_list
             ); target.addItem(item)
             attach_row = getattr(self, "_attach_profile_row", None)
             if callable(attach_row):
@@ -5022,740 +4969,31 @@ class MainWindow(QMainWindow):
         selected = self.storage.selected(); self.active_profile.setText(selected.name if selected else self.tr("کانفیگی انتخاب نشده", "No config selected")); self.route_card.set_secondary(self._profile_route_label(selected, carrier))
         self._update_config_actions()
 
-    def _maker_repo_url_changed(self, *_args):
-        current = self.maker_repo_url.text().strip()
-        self.maker_repo_btn.setEnabled(
-            bool(current)
-            and not self._maker_import_in_progress
-            and current != self._maker_last_loaded_url
-        )
-        self._update_maker_guide()
 
-    def _maker_editor_changed(self):
-        self._sync_maker_editor_direction()
-        self._update_maker_guide()
 
-    def _set_maker_guide_button(self, button):
-        if self._maker_guide_button is button:
-            return
-        if self._maker_guide_animation is not None:
-            self._maker_guide_animation.stop()
-        if self._maker_guide_button is not None:
-            self._maker_guide_button.setProperty("guided", False)
-            self._maker_guide_button.setGraphicsEffect(None)
-            _restyle(self._maker_guide_button)
-        self._maker_guide_button = button
-        self._maker_guide_effect = None
-        self._maker_guide_animation = None
-        if button is None:
-            return
-        button.setProperty("guided", True)
-        _restyle(button)
-        if not _animations_enabled():
-            return
-        effect = QGraphicsDropShadowEffect(button)
-        effect.setOffset(0, 0)
-        effect.setColor(QColor(35, 245, 224, 205))
-        effect.setBlurRadius(9)
-        button.setGraphicsEffect(effect)
-        animation = QPropertyAnimation(effect, b"blurRadius", self)
-        animation.setDuration(1450)
-        animation.setStartValue(9.0)
-        animation.setKeyValueAt(0.48, 30.0)
-        animation.setEndValue(9.0)
-        animation.setEasingCurve(QEasingCurve.InOutSine)
-        animation.setLoopCount(-1)
-        self._maker_guide_effect = effect
-        self._maker_guide_animation = animation
-        animation.start()
 
-    def _update_maker_guide(self):
-        if (
-                not hasattr(self, "maker_repo_btn")
-                or self._maker_running
-                or self._maker_import_in_progress):
-            self._set_maker_guide_button(None)
-            return
-        editor_text = self.maker_source_editor.toPlainText().strip()
-        editor_dirty = (
-            bool(editor_text)
-            and editor_text != self._maker_last_converted_editor_text
-        )
-        if editor_dirty and self.maker_text_btn.isEnabled():
-            self._set_maker_guide_button(self.maker_text_btn)
-            return
-        if (
-                self.maker_repo_btn.isEnabled()
-                and (
-                    not self._maker_profiles
-                    or bool(self._maker_last_loaded_url)
-                )):
-            self._set_maker_guide_button(self.maker_repo_btn)
-            return
-        statuses = self.maker_model.status_counts()
-        if int(statuses.get("healthy", 0)) > 0:
-            self._set_maker_guide_button(self.maker_add_all_btn)
-            return
-        if self._maker_profiles and self.maker_start_btn.isEnabled():
-            self._set_maker_guide_button(self.maker_start_btn)
-            return
-        self._set_maker_guide_button(None)
 
-    def _maker_import_worker(
-            self, loader, source, replace=False, editor_text=""):
-        self._maker_import_generation += 1
-        generation = self._maker_import_generation
-        self._maker_import_in_progress = True
-        self._maker_repo_url_changed()
-        self.maker_import_badge.setText(self.tr("در حال پردازش…", "Processing…"))
 
-        def work():
-            try:
-                maker = SniConfigMaker(
-                    fake_sni=self.storage.tuning.pattern_fake_sni,
-                )
-                imported = loader(maker)
-                converted = maker.convert_many(imported.profiles)
-                self.bridge.maker_imported.emit(
-                    {"imported": imported, "converted": converted},
-                    {
-                        "source": source,
-                        "replace": bool(replace),
-                        "editor_text": str(editor_text or ""),
-                    },
-                    generation,
-                )
-            except Exception as exc:
-                self.bridge.maker_imported.emit(
-                    {"error": str(exc)},
-                    {
-                        "source": source,
-                        "replace": bool(replace),
-                        "editor_text": str(editor_text or ""),
-                    },
-                    generation,
-                )
 
-        threading.Thread(target=work, name="sni-maker-import", daemon=True).start()
 
-    def _maker_import_text(self, text, source="text"):
-        payload = str(text or "").strip()
-        if not payload:
-            self.show_toast(self.tr("متنی برای تبدیل وجود ندارد", "No configuration text to convert"), "warning")
-            return
-        self._maker_import_worker(
-            lambda maker: maker.import_text(payload, source=source),
-            source,
-            editor_text=payload if source == "editor" else "",
-        )
 
-    def _maker_import_files(self):
-        paths, _filter = QFileDialog.getOpenFileNames(
-            self,
-            self.tr("انتخاب فایل کانفیگ", "Select configuration files"),
-            "",
-            "Config files (*.txt *.conf *.json *.yaml *.yml);;All files (*.*)",
-        )
-        if not paths:
-            return
 
-        try:
-            chunks = []
-            for value in paths:
-                path = __import__("pathlib").Path(value)
-                if path.stat().st_size > 64 * 1024 * 1024:
-                    raise ValueError(f"File is too large: {path.name}")
-                chunks.append(path.read_text(encoding="utf-8-sig", errors="replace"))
-            self.maker_source_editor.append_payload("\n".join(chunks), paths)
-            self.show_toast(
-                self.tr(
-                    "فایل آماده است؛ اکنون تبدیل را بزنید.",
-                    "File ready; press Convert next.",
-                ),
-                "success",
-            )
-            self._update_maker_guide()
-        except (OSError, ValueError) as exc:
-            self.show_toast(str(exc), "danger")
 
-    def _maker_fetch_repository(self):
-        url = self.maker_repo_url.text().strip() or DEFAULT_SNI_MAKER_URL
-        self.maker_repo_btn.setEnabled(False)
-        self._maker_import_worker(
-            lambda maker: maker.import_url(url, timeout=20.0),
-            url,
-            replace=True,
-        )
 
-    def _maker_import_finished(self, payload, meta, generation):
-        if generation != self._maker_import_generation:
-            return
-        self._maker_import_in_progress = False
-        error = str(payload.get("error", "") if isinstance(payload, dict) else "")
-        if error:
-            self.maker_import_badge.setText(self.tr("خطا در دریافت یا پردازش", "Import failed"))
-            self.show_toast(error, "danger")
-            self._maker_repo_url_changed()
-            return
-        imported = payload.get("imported")
-        converted = payload.get("converted")
-        if not isinstance(imported, SniImportResult) or converted is None:
-            self._maker_repo_url_changed()
-            return
-        loaded_source = str(meta.get("source", "") or "").strip()
-        if bool(meta.get("replace", False)):
-            self._maker_last_loaded_url = loaded_source
-        editor_text = str(meta.get("editor_text", "") or "")
-        if editor_text:
-            self._maker_last_converted_editor_text = editor_text.strip()
-        if bool(meta.get("replace", False)):
-            self._maker.clear()
-            self._maker_profiles.clear()
-            self._maker_base_names.clear()
-            self._maker_country_labels.clear()
-            self._maker_last_country_summary = None
-            self.maker_model.clear()
-            self.maker_country_rail.set_country_counts(
-                {},
-                all_label=self.tr("همه کشورها", "All countries"),
-            )
-            self.maker_progress.setMaximum(100)
-            self.maker_progress.setValue(0)
-            self.maker_progress.set_status(
-                self.tr("آماده تست", "Tester ready"), "idle"
-            )
-        if imported.input_format == "base64":
-            self.show_toast(
-                f"Base64 subscription decoded: {imported.detected_count} configs found.",
-                "success",
-            )
-        elif imported.input_format == "direct":
-            self.show_toast(
-                f"Direct configs detected: {imported.detected_count} configs found.",
-                "success",
-            )
-        rows = []
-        added_profiles = []
-        duplicate_existing = 0
-        for result in converted.results:
-            profile = result.profile
-            if profile is None:
-                continue
-            key = config_signature(profile)
-            if key in self._maker_profiles:
-                duplicate_existing += 1
-                continue
-            if result.direct:
-                profile.origin = USER_CONFIG_ORIGIN
-                profile.spoof_fake_sni = ""
-            else:
-                profile.address = VERIFIED_SPOOF_EDGE
-                profile.config_host = "127.0.0.1"
-                profile.config_port = 40443
-                profile.origin = USER_CONFIG_ORIGIN
-                profile.spoof_fake_sni = (
-                    profile.spoof_fake_sni
-                    or self.storage.tuning.pattern_fake_sni
-                )
-            profile.verified_spoof = False
-            profile.verified_route = False
-            self._maker_profiles[key] = profile
-            base_name = profile.name
-            if base_name.endswith(" · SNI"):
-                base_name = base_name[:-6].rstrip()
-            self._maker_base_names[key] = base_name
-            added_profiles.append(profile)
-            rows.append({
-                "key": key,
-                "uri": profile.source_uri,
-                "source_uri": result.source_profile.source_uri,
-                "status": "ready" if (
-                    result.already_sni or result.direct
-                ) else "converted",
-                "country_code": "XX",
-                "label": profile.name,
-            })
-        self._maker.add_profiles(added_profiles, source=str(meta.get("source", "")))
-        self.maker_model.append_batch(rows, deduplicate=True)
-        duplicate_count = imported.duplicate_count + duplicate_existing
-        details = [
-            self.tr(f"{len(added_profiles)} آماده تست", f"{len(added_profiles)} testable"),
-            self.tr(f"{duplicate_count} تکراری", f"{duplicate_count} duplicates"),
-        ]
-        if imported.unsupported_count:
-            protocols = ", ".join(f"{name}:{count}" for name, count in imported.unsupported_by_protocol.items())
-            details.append(self.tr(
-                f"{imported.unsupported_count} ناسازگار ({ltr_isolate(protocols)})",
-                f"{imported.unsupported_count} unsupported ({protocols})",
-            ))
-        if converted.incompatible_count:
-            details.append(self.tr(
-                f"{converted.incompatible_count} ناسازگار با متد",
-                f"{converted.incompatible_count} incompatible with SNI mode",
-            ))
-        if imported.invalid_count:
-            details.append(self.tr(
-                f"{imported.invalid_count} نامعتبر",
-                f"{imported.invalid_count} invalid",
-            ))
-        issue_count = (
-            imported.unsupported_count + converted.incompatible_count
-            + imported.invalid_count
-        )
-        compact = [self.tr(
-            f"{len(added_profiles)} آماده",
-            f"{len(added_profiles)} ready",
-        )]
-        if issue_count:
-            compact.append(self.tr(f"{issue_count} مشکل", f"{issue_count} issues"))
-        elif duplicate_count:
-            compact.append(self.tr(
-                f"{duplicate_count} تکراری",
-                f"{duplicate_count} duplicates",
-            ))
-        self.maker_import_badge.setText(" · ".join(compact))
-        self.maker_import_badge.setToolTip("  •  ".join(details))
-        source = str(meta.get("source", ""))
-        if source.startswith("http"):
-            self.storage.settings["sni_maker_url"] = source
-            self.storage.save_settings()
-        self.maker_progress.setFormat(self.tr(
-            f"{len(self._maker_profiles)} کانفیگ آماده تست زنده",
-            f"{len(self._maker_profiles)} configs ready for live testing",
-        ))
-        self._set_activity(
-            "کانفیگ‌ها تبدیل و برای تست آماده شدند.",
-            "Configurations converted and queued for testing.",
-            "success", False,
-        )
-        self._maker_repo_url_changed()
-        self._update_maker_guide()
-    def _maker_start_test(self):
-        if self._maker_running:
-            return
-        if self.engine.running or self.connecting:
-            self.show_toast(self.tr(
-                "برای تست همزمان کانفیگ‌ها ابتدا اتصال فعلی را قطع کنید",
-                "Disconnect the active tunnel before batch testing",
-            ), "warning")
-            return
-        profiles = list(self._maker_profiles.values())
-        if not profiles:
-            self.show_toast(self.tr("ابتدا کانفیگ اضافه کنید", "Add configurations first"), "warning")
-            return
-        self._maker_generation += 1
-        generation = self._maker_generation
-        self._maker_running = True
-        self._update_maker_guide()
-        self._maker_cancel_event = threading.Event()
-        self._maker_tester = SniBatchTester(self.bridge.log.emit)
-        self.maker_start_btn.setEnabled(False); self.maker_stop_btn.setEnabled(True)
-        for widget in (
-                self.maker_clear_btn,
-                self.maker_repo_btn, self.maker_repo_reset_btn,
-                self.maker_file_btn, self.maker_clip_btn, self.maker_text_btn,
-                self.maker_repo_url, self.maker_source_editor):
-            widget.setEnabled(False)
-        self.maker_model.update_batch([
-            {"key": key, "status": "testing", "error": ""}
-            for key in self._maker_profiles
-        ])
-        self.maker_progress.setMaximum(len(profiles)); self.maker_progress.setValue(0)
-        self.maker_progress.set_status(self.tr("تست زنده مسیرها", "Live route testing"), "running")
-        self.maker_progress.setFormat(self.tr(
-            f"۰ از {len(profiles)} کانفیگ",
-            f"0 of {len(profiles)} configs",
-        ))
-        workers = self.maker_threads.value()
-        timeout = float(self.maker_timeout.value())
-        tuning = self.storage.tuning
-        carrier = tuning.carrier_mode
-        strategy = str(self.storage.settings.get(
-            f"working_strategy_{carrier}",
-            "tls_sni_records" if carrier == "mci" else "wrong_seq",
-        ) or "").strip().lower()
-        tester = self._maker_tester
-        cancel = self._maker_cancel_event
 
-        def progress(batch, done, total):
-            self.bridge.maker_batch.emit(batch, done, total, generation)
 
-        def work():
-            try:
-                results = tester.run(
-                    profiles, tuning, cancel,
-                    workers=workers, timeout=timeout, strategy=strategy,
-                    progress=progress,
-                )
-                self.bridge.maker_done.emit(
-                    {"count": len(results), "cancelled": cancel.is_set()},
-                    generation,
-                )
-            except Exception as exc:
-                self.bridge.maker_failed.emit(str(exc), generation)
 
-        threading.Thread(target=work, name="sni-maker-live", daemon=True).start()
 
-    def _maker_test_batch(self, batch, done, total, generation):
-        if generation != self._maker_generation:
-            return
-        updates = []
-        now = time.time()
-        for result in batch:
-            if not isinstance(result, LiveConfigResult):
-                continue
-            key = config_signature(result.profile)
-            profile = self._maker_profiles.get(key)
-            if profile is None:
-                continue
-            verified_code = normalize_country_code(result.country_code)
-            if result.ok and verified_code != "XX":
-                profile.last_ping_ok = True
-                profile.last_ping_ms = float(result.ping_ms)
-                profile.country_latency_ms = int(round(result.ping_ms))
-                profile.country_code = verified_code
-                profile.observed_country_code = verified_code
-                profile.observed_country_name = result.country
-                profile.observed_exit_ip = result.exit_ip
-                profile.country_verified_at = now
-                profile.country_source = result.source
-                direct = profile.route_mode == "reality-direct"
-                profile.verified_route = direct
-                profile.verified_spoof = not direct
-                profile.origin = (
-                    USER_CONFIG_ORIGIN
-                )
-                profile.spoof_fake_sni = (
-                    "" if direct else (
-                        profile.spoof_fake_sni
-                        or self.storage.tuning.pattern_fake_sni
-                    )
-                )
-                country = result.country or verified_code
-                base_name = self._maker_base_names.get(key, profile.name)
-                route_label = "Reality" if direct else "SNI"
-                profile.name = f"{country} · {base_name} · {route_label}"
-                self._maker_country_labels[verified_code] = country
-                updates.append({
-                    "key": key,
-                    "status": "healthy",
-                    "country_code": verified_code,
-                    "ping_ms": result.ping_ms,
-                    "label": profile.name,
-                    "error": f"{result.exit_ip} · {result.source}",
-                })
-            else:
-                profile.last_ping_ok = False
-                profile.last_ping_ms = 0.0
-                profile.verified_spoof = False
-                profile.verified_route = False
-                profile.country_code = ""
-                profile.observed_country_code = ""
-                profile.observed_country_name = ""
-                profile.observed_exit_ip = ""
-                profile.country_verified_at = 0.0
-                profile.country_source = ""
-                route_label = (
-                    "Reality"
-                    if profile.route_mode == "reality-direct" else "SNI"
-                )
-                profile.name = (
-                    f"{self._maker_base_names.get(key, profile.name)}"
-                    f" · {route_label}"
-                )
-                updates.append({
-                    "key": key,
-                    "status": "failed",
-                    "country_code": "XX",
-                    "ping_ms": None,
-                    "error": result.error or "Live route test failed",
-                })
-        self.maker_model.update_batch(updates)
-        self.maker_progress.setValue(done)
-        self.maker_progress.setFormat(self.tr(
-            f"{done} از {total} کانفیگ تست شد",
-            f"{done} of {total} configs tested",
-        ))
 
-    def _maker_finish_test_ui(self):
-        self._maker_running = False
-        self.maker_start_btn.setEnabled(True); self.maker_stop_btn.setEnabled(False)
-        self.maker_source_card.setVisible(True)
-        for widget in (
-                self.maker_clear_btn,
-                self.maker_repo_btn, self.maker_repo_reset_btn,
-                self.maker_file_btn, self.maker_clip_btn, self.maker_text_btn,
-                self.maker_repo_url, self.maker_source_editor):
-            widget.setEnabled(True)
-        self._maker_tester = None
-        self._maker_repo_url_changed()
-        self._update_maker_guide()
 
-    def _maker_test_done(self, payload, generation):
-        if generation != self._maker_generation:
-            return
-        cancelled = bool(payload.get("cancelled", False)) if isinstance(payload, dict) else False
-        if cancelled:
-            updates = []
-            for key, profile in self._maker_profiles.items():
-                row = self.maker_model.row_for_key(key)
-                result = self.maker_model.result_at(row)
-                if result is None or result.status != "testing":
-                    continue
-                updates.append({
-                    "key": key,
-                    "status": "healthy" if profile.route_is_verified else "ready",
-                    "country_code": profile.observed_country_code or "XX",
-                    "ping_ms": profile.last_ping_ms if profile.last_ping_ok else None,
-                    "error": "",
-                })
-            self.maker_model.update_batch(updates)
-        self._maker_finish_test_ui()
-        healthy = len(self.maker_model.healthy_results())
-        total = self.maker_model.rowCount()
-        self.maker_progress.set_status(
-            self.tr("تست متوقف شد", "Testing stopped") if cancelled else
-            self.tr("تست زنده کامل شد", "Live testing completed"),
-            "warning" if cancelled else "success",
-        )
-        self.maker_progress.setFormat(self.tr(
-            f"{healthy} کانفیگ سالم در {len(self._maker_country_labels)} کشور",
-            f"{healthy} healthy configs across {len(self._maker_country_labels)} countries",
-        ))
-        self._set_activity(
-            f"تست کانفیگ‌ها پایان یافت؛ {healthy} کانفیگ سالم است.",
-            f"Config testing finished; {healthy} configs are healthy.",
-            "warning" if cancelled else "success", False,
-        )
 
-    def _maker_failed(self, message, generation):
-        if generation != self._maker_generation:
-            return
-        self._maker_finish_test_ui()
-        self.maker_model.update_batch([
-            {"key": key, "status": "ready", "error": str(message)}
-            for key in self._maker_profiles
-            if self.maker_model.result_at(self.maker_model.row_for_key(key))
-            and self.maker_model.result_at(self.maker_model.row_for_key(key)).status == "testing"
-        ])
-        self.maker_progress.set_status(self.tr("خطای تست زنده", "Live test error"), "warning")
-        self.maker_progress.setFormat(str(message))
-        self.show_toast(str(message), "danger")
 
-    def _maker_stop_test(self):
-        if not self._maker_running:
-            return
-        self._maker_cancel_event.set()
-        self.maker_stop_btn.setEnabled(False)
-        self.maker_progress.set_status(self.tr("در حال توقف…", "Stopping…"), "warning")
-        tester = self._maker_tester
-        if tester is not None:
-            threading.Thread(target=tester.stop, name="sni-maker-stop", daemon=True).start()
-
-    def _maker_clear(self):
-        self._maker_stop_test()
-        self._maker_generation += 1
-        self._maker_import_generation += 1
-        self._maker_finish_test_ui()
-        self._maker_import_in_progress = False
-        self._maker_last_loaded_url = ""
-        self._maker_last_converted_editor_text = ""
-        self._maker.clear()
-        self._maker_profiles.clear()
-        self._maker_base_names.clear()
-        self._maker_country_labels.clear()
-        self._maker_last_country_summary = None
-        self.maker_model.clear()
-        self.maker_source_editor.clear()
-        self.maker_country_rail.set_country_counts({}, all_label=self.tr("همه کشورها", "All countries"))
-        self.maker_import_badge.setText(self.tr("آماده دریافت", "Ready"))
-        self.maker_import_badge.setToolTip("")
-        self.maker_progress.setMaximum(100); self.maker_progress.setValue(0)
-        self.maker_progress.set_status(self.tr("آماده تست", "Tester ready"), "idle")
-        self.maker_progress.setFormat(self.tr("منتظر کانفیگ", "Waiting for configs"))
-        self._maker_repo_url_changed()
-        self._update_maker_guide()
-
-    def _maker_summary_changed(self, summary):
-        total = int(summary.get("total", 0))
-        checked = int(summary.get(
-            "checked", len(self.maker_model.checked_results())
-        ))
-        healthy = int(summary.get("statuses", {}).get("healthy", 0))
-        countries = {
-            code: values
-            for code, values in summary.get("countries", {}).items()
-            if code != "XX" and (
-                values.get("healthy", 0) or values.get("testing", 0)
-            )
-        }
-        if countries != self._maker_last_country_summary:
-            selected = self.maker_country_rail.selected_country()
-            labels = {}
-            for code in countries:
-                known = COUNTRIES.get(code)
-                if known:
-                    labels[code] = known[1] if self.language == "en" else known[2]
-                else:
-                    labels[code] = self._maker_country_labels.get(code, code)
-            self.maker_country_rail.set_country_counts(
-                countries,
-                labels=labels,
-                selected=selected,
-                all_label=self.tr("همه کشورها", "All countries"),
-            )
-            self._maker_last_country_summary = {
-                code: dict(values) for code, values in countries.items()
-            }
-        self.maker_summary_badge.setText(self.tr(
-            f"{healthy} سالم از {total}",
-            f"{healthy} healthy of {total}",
-        ))
-        self.maker_select_all_checkbox.setEnabled(total > 0)
-        self.maker_select_all_checkbox.setChecked(total > 0 and checked == total)
-        enabled = healthy > 0
-        for button in (
-                self.maker_add_selected_btn, self.maker_add_country_btn,
-                self.maker_add_all_btn, self.maker_copy_btn,
-                self.maker_export_btn):
-            button.setEnabled(enabled)
-        if not self._maker_running:
-            self.maker_start_btn.setEnabled(bool(self._maker_profiles))
-        self._update_maker_guide()
-
-    def _position_maker_select_all(self):
-        if not hasattr(self, "maker_select_all_checkbox"):
-            return
-        header = self.maker_table.horizontalHeader()
-        section_x = header.sectionViewportPosition(MakerColumns.MARK)
-        section_width = header.sectionSize(MakerColumns.MARK)
-        box = self.maker_select_all_checkbox
-        box.move(
-            section_x + max(0, (section_width - box.width()) // 2),
-            max(0, (header.height() - box.height()) // 2),
-        )
-        box.raise_()
-
-    def _maker_add_results(self, mode):
-        if mode == "selected":
-            results = [
-                result for result in self.maker_model.checked_results()
-                if result.status == "healthy"
-            ]
-        elif mode == "country":
-            code = self.maker_country_rail.selected_country()
-            results = self.maker_model.healthy_results("" if code == "*" else code)
-        else:
-            results = self.maker_model.healthy_results()
-        existing = {
-            config_signature(profile)
-            for profile in self.storage.profiles
-            if profile.source_uri and profile.origin in USER_CONFIG_ORIGINS
-        }
-        added = []
-        duplicate_count = 0
-        for result in results:
-            profile = self._maker_profiles.get(result.key)
-            if profile is None or not profile.route_is_verified:
-                continue
-            signature = config_signature(profile)
-            if signature in existing:
-                duplicate_count += 1
-                continue
-            existing.add(signature)
-            value = replace(profile)
-            value.id = str(uuid.uuid4())
-            value.origin = USER_CONFIG_ORIGIN
-            added.append(value)
-        if not added:
-            if results and duplicate_count == len(results):
-                self.show_toast(self.tr(
-                    "کانفیگ‌های سالم انتخاب‌شده از قبل در User Config هستند",
-                    "Selected healthy configs are already in User Config",
-                ), "warning")
-                return
-            self.show_toast(self.tr(
-                "کانفیگ سالم جدیدی برای افزودن وجود ندارد",
-                "No new healthy configs to add",
-            ), "warning")
-            return
-        connection_active = bool(
-            self.connecting or self.engine.running or self._profile_switch_waiting
-        )
-        self.storage.profiles.extend(added)
-        self.storage.settings["route_source"] = "user-config"
-        self.route_source_tabs.setCurrentIndex(1)
-        if not connection_active and len(added) == 1:
-            self.storage.selected_id = added[0].id
-            self._forced_profile_id = added[0].id
-            self._remember_direct_profile(added[0])
-        known_codes = {
-            str(code).upper()
-            for code in self.storage.settings.get("known_country_codes", [])
-            if len(str(code)) == 2
-        }
-        known_codes.update(
-            profile.country_code.upper()
-            for profile in added if len(profile.country_code) == 2
-        )
-        self.storage.settings["known_country_codes"] = sorted(known_codes)
-        self.storage.save_profiles()
-        self.storage.save_settings()
-        self.refresh_profiles()
-        self.profile_tabs.setCurrentIndex(
-            self._profile_tab_index(self.user_config_list)
-        )
-        for row in range(self.user_config_list.count()):
-            item = self.user_config_list.item(row)
-            if item.data(Qt.UserRole) == added[0].id:
-                self.user_config_list.setCurrentItem(item)
-                break
-        self.show_toast(self.tr(
-            f"{len(added)} کانفیگ سالم به User Config افزوده شد",
-            f"{len(added)} healthy configs added to User Config",
-        ), "success")
-        self._set_activity(
-            f"{len(added)} کانفیگ سازنده SNI در User Config ذخیره شد.",
-            f"{len(added)} SNI Maker configs saved in User Config.",
-            "success", False,
-        )
-
-    def _maker_copy_marked(self):
-        results = [
-            result for result in self.maker_model.checked_results()
-            if result.status == "healthy"
-        ]
-        if not results:
-            self.show_toast(self.tr("کانفیگی علامت نخورده است", "No healthy configs are marked"), "warning")
-            return
-        QApplication.clipboard().setText("\n".join(result.uri for result in results))
-        self.show_toast(self.tr("کانفیگ‌ها کپی شدند", "Configurations copied"), "success")
-
-    def _maker_export_healthy(self):
-        results = self.maker_model.healthy_results()
-        if not results:
-            self.show_toast(self.tr("هنوز کانفیگ سالمی وجود ندارد", "No healthy configs yet"), "warning")
-            return
-        path, _filter = QFileDialog.getSaveFileName(
-            self,
-            self.tr("ذخیره کانفیگ‌های سالم", "Export healthy configurations"),
-            str(DATA_DIR / "sni-maker-healthy.txt"),
-            "Text files (*.txt)",
-        )
-        if not path:
-            return
-        __import__("pathlib").Path(path).write_text(
-            "\n".join(result.uri for result in results) + "\n",
-            encoding="utf-8",
-        )
-        self.show_toast(self.tr("فایل خروجی ذخیره شد", "Export file saved"), "success")
 
     def selected_profile_items(self):
         widget = self._current_profile_list()
         if (
                 widget is not self.user_config_list
-                and widget is not self.manual_list
-                and widget is not self.suggested_list):
+                and widget is not self.manual_list):
             return []
         return [
             item for item in widget.selectedItems()
@@ -5786,15 +5024,8 @@ class MainWindow(QMainWindow):
             MainWindow._remember_direct_profile(self, selected)
             if selected.origin in DIRECT_PROFILE_ORIGINS:
                 self._forced_profile_id = selected.id
-            route_tabs = getattr(self, "route_source_tabs", None)
             if selected.origin == USER_CONFIG_ORIGIN:
                 self.storage.settings["route_source"] = "user-config"
-                if route_tabs is not None:
-                    route_tabs.setCurrentIndex(1)
-            elif selected.origin not in DIRECT_PROFILE_ORIGINS:
-                self.storage.settings["route_source"] = "suggested"
-                if route_tabs is not None:
-                    route_tabs.setCurrentIndex(0)
             save_settings = getattr(self.storage, "save_settings", None)
             if callable(save_settings):
                 save_settings()
@@ -5916,17 +5147,6 @@ class MainWindow(QMainWindow):
         existing = {x.source_uri.split("#")[0] for x in self.storage.profiles}; profiles = [x for x in profiles if x.source_uri.split("#")[0] not in existing]
         self.storage.profiles.extend(profiles); self.storage.save_profiles(); self.refresh_profiles(); self.show_toast(self.tr(f"{len(profiles)} کانفیگ اضافه شد", f"Added {len(profiles)} config(s)"), "success"); self._set_activity("ورود کانفیگ کامل شد.", "Config import completed.", "success", False)
 
-    def sync_profiles(self):
-        self.sync_btn.setEnabled(False); self._set_activity("در حال دریافت کانفیگ‌های پیشنهادی…", "Syncing suggested configs…")
-        def work():
-            try:
-                text = requests.get(REMOTE_CONFIGS_URL, timeout=15).text; items = parse_many(text, suggested=True); existing = {x.source_uri.split('#')[0] for x in self.storage.profiles}; added = 0
-                self.storage.profiles = [x for x in self.storage.profiles if x.origin != "github"]
-                for item in items:
-                    if item.source_uri.split('#')[0] not in existing: item.origin = "github"; item.name = "GitHub " + item.name; self.storage.profiles.append(item); added += 1
-                self.storage.save_profiles(); self.bridge.profiles_changed.emit(); self.bridge.log.emit(f"Suggested configs synced: {added}"); self.bridge.activity.emit(self.tr(f"همگام‌سازی کامل شد؛ {added} کانفیگ اضافه شد.", f"Sync complete; {added} config(s) added."), "success", False)
-            except Exception as exc: self.bridge.error.emit(str(exc))
-        threading.Thread(target=work, daemon=True).start()
 
     def _begin_connect_attempt(self):
         self._cancel_mode_apply()
@@ -6164,6 +5384,22 @@ class MainWindow(QMainWindow):
             except TypeError:
                 continue
         return max(candidates, key=lambda result: (result.score, result.stability, -result.first_byte_ms), default=None)
+
+    @staticmethod
+    def _bind_verified_sni_route(tuning, result):
+        """Bind only an edge that was previously tested and verified for this domain."""
+        tuning.pattern_fake_sni = result.domain
+        if not getattr(result, "edge_verified", False) or not result.edge:
+            return tuning
+        previous = [tuning.pattern_connect_ip, *str(tuning.pattern_fallback_ips or "").split(",")]
+        tuning.pattern_connect_ip = result.edge
+        fallbacks = []
+        for value in previous:
+            value = str(value or "").strip()
+            if value and value != result.edge and value not in fallbacks:
+                fallbacks.append(value)
+        tuning.pattern_fallback_ips = ",".join(fallbacks[:4])
+        return tuning
 
     def _ordered_profiles(self, fake_sni, cancel_event, auto_enabled=True, manual_only=False,
                           forced_profile=None):
@@ -6518,12 +5754,6 @@ class MainWindow(QMainWindow):
         return True
 
     def toggle_connection(self):
-        if getattr(self, "_maker_running", False) and not self.engine.running and not self.connecting:
-            self.show_toast(self.tr(
-                "ابتدا تست زنده سازنده SNI را متوقف کنید",
-                "Stop the SNI Maker live test before connecting",
-            ), "warning")
-            return
         if self.connecting:
             self.connecting = False
             self.connection_error = ""
@@ -7273,372 +6503,16 @@ class MainWindow(QMainWindow):
         else:
             self.show_toast(self.tr("لینک معتبر Release موجود نیست", "No valid release link is available"), "warning")
 
-    def toggle_scan(self):
-        if self.scanning:
-            self.scan_cancelled = True; self._scan_cancel_event.set()
-            self.scan_progress.set_status(self.tr("در حال توقف اسکن", "Stopping scan"), "warning")
-            self.scan_button.setEnabled(False); self.scan_state_badge.setText(self.tr("در حال توقف", "Stopping")); self._set_activity(f"در حال توقف اسکن {ltr_isolate('SNI')}…", "Stopping SNI scan…", "warning", True)
-            return
-        domains = list(dict.fromkeys(x.strip().lower() for x in self.domains.toPlainText().splitlines() if x.strip() and not x.startswith("#")))
-        if not domains: self.show_toast(self.tr("حداقل یک دامنه وارد کنید", "Enter at least one domain"), "warning"); return
-        self._scan_generation += 1; generation = self._scan_generation
-        self._scan_cancel_event = threading.Event(); self._scan_results_by_domain = {}; self.last_results = []
-        self.scanning = True; self.scan_cancelled = False; self.scan_button.setEnabled(True); self.scan_button.setText(self.tr("توقف اسکن", "Stop Scan")); self.scan_button.setIcon(cyber_icon("x-circle", "#eaffff", 18)); self.scan_progress.setMaximum(len(domains)); self.scan_progress.setValue(0); self.results_table.setSortingEnabled(False); self.results_table.setRowCount(0); self.results_table.setSortingEnabled(True); self.scan_state_badge.setText(self.tr("در حال اسکن", "Scanning"))
-        self.scan_progress.set_status(self.tr("در حال اسکن مسیرهای شبکه", "Scanning network routes"), "running")
-        self.scan_progress.setFormat(self.tr("در انتظار اولین نتیجه…", "Waiting for the first result…"))
-        self._set_activity(f"در حال آزمایش دسترسی دامنه‌های {ltr_isolate('SNI')}…", "Testing SNI domain reachability…")
-        threads, tries, timeout = self.scan_threads.value(), self.scan_tries.value(), self.scan_timeout.value()
-        cancel_event = self._scan_cancel_event
-        scan_tuning = self.storage.tuning
-        self._scan_context = {"generation": generation, "carrier": scan_tuning.carrier_mode,
-                              "edge": scan_tuning.pattern_connect_ip}
-        def work():
-            try:
-                results = scan_domains(
-                    domains, threads, tries, timeout,
-                    lambda done, total, result: self.bridge.scan_progress.emit(done, total, result, generation),
-                    cancel_event.is_set,
-                    edge_ip=scan_tuning.pattern_connect_ip,
-                )
-                self.bridge.scan_done.emit(results, generation)
-            except Exception as exc:
-                self.bridge.scan_failed.emit(str(exc), generation)
-        threading.Thread(target=work, name=f"sni-scan-{generation}", daemon=True).start()
-
-    def _scan_progress(self, done, total, result, generation):
-        if generation != self._scan_generation or not self.scanning:
-            return
-        self.scan_progress.setValue(done)
-        self.scan_progress.setFormat(f"{done}/{total}  •  {result.domain}")
-        self.activity_bar.set_activity(self.tr(f"در حال اندازه‌گیری {ltr_isolate(result.domain)} ({done}/{total})", f"Measuring {result.domain} ({done}/{total})"), "running", True)
-        if result.success:
-            scan_context = getattr(self, "_scan_context", {})
-            context = scan_context if scan_context.get("generation") == generation else {}
-            result.tested_at = time.time(); result.carrier = result.carrier or context.get("carrier", "")
-            self._scan_results_by_domain[result.domain.lower()] = result
-            self._upsert_scan_result(result)
-
-    def _scan_done(self, results, generation):
-        if generation != self._scan_generation:
-            return
-        for result in results:
-            if not result.success: continue
-            scan_context = getattr(self, "_scan_context", {})
-            context = scan_context if scan_context.get("generation") == generation else {}
-            result.tested_at = result.tested_at or time.time(); result.carrier = result.carrier or context.get("carrier", "")
-            self._scan_results_by_domain[result.domain.lower()] = result
-            self._upsert_scan_result(result)
-        self.last_results = sorted(self._scan_results_by_domain.values(), key=lambda x: (-x.score, -x.stability, x.first_byte_ms, x.ping_ms, x.domain))
-        self._persist_scan_repository(self.last_results)
-        self.scanning = False; self._scan_cancel_event.set(); self.scan_button.setEnabled(True); self.scan_button.setText(self.tr("شروع اسکن", "Start Scan")); self.scan_button.setIcon(cyber_icon("play", "#031422", 18))
-        state = "warning" if self.scan_cancelled else "success"
-        label = self.tr(f"اسکن پایان یافت • {len(self.last_results)} مسیر سالم", f"Scan complete • {len(self.last_results)} working routes")
-        self.scan_progress.set_status(label, state); self.scan_state_badge.setText(self.tr("اسکن متوقف شد", "Scan Stopped") if self.scan_cancelled else self.tr("اسکن کامل شد", "Scan Complete")); self.activity_bar.set_activity(label, state, False)
-        self.results_table.sortItems(8, Qt.DescendingOrder)
-        self._append_log(f"SNI scan completed: {len(self.last_results)} working routes")
-
-    def _scan_failed(self, message, generation):
-        if generation != self._scan_generation:
-            return
-        self.last_results = sorted(self._scan_results_by_domain.values(), key=lambda x: (-x.score, -x.stability, x.first_byte_ms, x.ping_ms, x.domain))
-        if self.last_results: self._persist_scan_repository(self.last_results)
-        self.scanning = False; self._scan_cancel_event.set(); self.scan_button.setEnabled(True); self.scan_button.setText(self.tr("شروع اسکن", "Start Scan")); self.scan_button.setIcon(cyber_icon("play", "#031422", 18))
-        self.scan_progress.set_status(self.tr("اسکن با خطا متوقف شد", "Scan stopped with an error"), "error"); self.scan_state_badge.setText(self.tr("خطای اسکن", "Scan Error"))
-        self.activity_bar.set_activity(message, "error", False); self.show_toast(message, "danger")
-
-    def _persist_scan_repository(self, results):
 
 
-        def repository_key(item):
-            return (
-                str(item.get("carrier", "") or "").strip().lower(),
-                str(item.get("edge", "") or "").strip().lower(),
-                str(item.get("domain", "") or "").strip().lower(),
-            )
 
-        repository = {repository_key(item): item for item in self.storage.scan_results
-                      if isinstance(item, dict) and item.get("domain")}
-        for result in results:
-            result.tested_at = result.tested_at or time.time()
-            result.carrier = result.carrier or self.storage.tuning.carrier_mode
-            raw = result.to_dict()
-            repository[repository_key(raw)] = raw
-        self.storage.scan_results = sorted(repository.values(), key=lambda item: (
-            -float(item.get("score", -9999)), -float(item.get("stability", 0)),
-            float(item.get("first_byte_ms", 99999)), float(item.get("ping_ms", 99999)),
-            str(item.get("domain", ""))))[:500]
-        self.storage.save_scan_results()
-
-    def _upsert_scan_result(self, result):
-        table = self.results_table; sort_column = table.horizontalHeader().sortIndicatorSection(); sort_order = table.horizontalHeader().sortIndicatorOrder(); table.setSortingEnabled(False)
-        row = next((index for index in range(table.rowCount()) if table.item(index, 1) and table.item(index, 1).text().lower() == result.domain.lower()), -1)
-        checked = False
-        if row >= 0:
-            holder = table.cellWidget(row, 0); selector = holder.findChild(QCheckBox) if holder else None; checked = bool(selector and selector.isChecked())
-        else:
-            row = table.rowCount(); table.insertRow(row)
-        self._populate_result_row(table, row, result, checked)
-        table.setSortingEnabled(True); table.sortItems(sort_column, sort_order)
-        self._update_scan_selection()
-
-    def _fill_results(self, table, results):
-        table.setSortingEnabled(False)
-        table.setRowCount(0)
-        for row, r in enumerate(results):
-            table.insertRow(row); self._populate_result_row(table, row, r)
-        table.setSortingEnabled(True)
-        self._update_scan_selection()
-
-    def _populate_result_row(self, table, row, r, checked=False):
-            selector = QCheckBox(); selector.setObjectName("rowSelector"); selector.setToolTip(self.tr("انتخاب این نتیجه SNI", "Select this SNI result")); selector.setChecked(checked)
-            selector.stateChanged.connect(self._update_scan_selection)
-            holder = QWidget(); holder_layout = QHBoxLayout(holder); holder_layout.setContentsMargins(0, 0, 0, 0); holder_layout.addWidget(selector, alignment=Qt.AlignCenter)
-            table.setCellWidget(row, 0, holder)
-
-            raw = r.to_dict() if hasattr(r, "to_dict") else r
-            domain = QTableWidgetItem(r.domain); domain.setData(Qt.UserRole, raw); domain.setToolTip(r.domain)
-            address = r.resolved_ip
-            ip_item = QTableWidgetItem(address); ip_item.setToolTip(address)
-            table.setItem(row, 1, domain); table.setItem(row, 2, ip_item)
-
-            colo_item = QTableWidgetItem(r.colo or "—"); table.setItem(row, 3, colo_item)
-            ping_item = QTableWidgetItem(); ping_item.setData(Qt.DisplayRole, int(r.ping_ms)); ping_item.setToolTip(f"{r.ping_ms} ms"); table.setItem(row, 4, ping_item)
-            stability_item = QTableWidgetItem(); stability_item.setData(Qt.DisplayRole, int(r.stability)); stability_item.setToolTip(f"{r.stability}%"); table.setItem(row, 5, stability_item)
-            first_item = QTableWidgetItem(); first_item.setData(Qt.DisplayRole, int(r.first_byte_ms)); first_item.setText(f"{r.first_byte_ms} ms"); table.setItem(row, 6, first_item)
-            bytes_item = QTableWidgetItem(); bytes_item.setData(Qt.DisplayRole, int(r.first_two_second_bytes)); bytes_item.setText(format_bytes(r.first_two_second_bytes)); table.setItem(row, 7, bytes_item)
-            score_item = QTableWidgetItem(); score_item.setData(Qt.DisplayRole, int(r.score)); table.setItem(row, 8, score_item)
-
-            ping_kind = "success" if r.ping_ms <= 100 else "warning" if r.ping_ms <= 250 else "danger"
-            stability_kind = "success" if r.stability >= 80 else "warning" if r.stability >= 50 else "danger"
-            score_kind = "success" if r.score >= 800 else "warning" if r.score >= 400 else "danger"
-            table.setCellWidget(row, 3, badge(r.colo or "—", "info"))
-            table.setCellWidget(row, 4, badge(f"{r.ping_ms} ms", ping_kind))
-            table.setCellWidget(row, 5, badge(f"{r.stability}%", stability_kind))
-            table.setCellWidget(row, 8, badge(str(r.score), score_kind))
-            for col in range(1, 9):
-                item = table.item(row, col)
-                if item:
-                    item.setTextAlignment(Qt.AlignVCenter | (Qt.AlignLeft if col in (1, 2) else Qt.AlignCenter))
-
-    def _active_result_table(self):
-        return self.results_table if self.scan_tabs.currentIndex() == 0 else self.bookmarks_table
-
-    def _selected_results(self):
-        table = self._active_result_table(); rows = set()
-        for row in range(table.rowCount()):
-            holder = table.cellWidget(row, 0)
-            check = holder.findChild(QCheckBox) if holder else None
-            if check and check.isChecked(): rows.add(row)
-        rows.update(index.row() for index in table.selectionModel().selectedRows())
-        results = []
-        for row in sorted(rows):
-            item = table.item(row, 1)
-            if not item: continue
-            raw = item.data(Qt.UserRole)
-            results.append(ScanResult(**raw) if isinstance(raw, dict) else raw)
-        return results
-
-    def _selected_result(self):
-        selected = self._selected_results()
-        if selected: return max(selected, key=lambda result: result.score)
-        table = self._active_result_table(); row = table.currentRow()
-        if row < 0: return None
-        item = table.item(row, 1)
-        if not item: return None
-        raw = item.data(Qt.UserRole); return ScanResult(**raw) if isinstance(raw, dict) else raw
-
-    def _update_scan_selection(self, *_):
-        if not hasattr(self, "scan_selection_label"): return
-        count = len(self._selected_results())
-        self.scan_selection_label.setText(self.tr(f"{count} ردیف انتخاب شده", f"{count} row{'s' if count != 1 else ''} selected") if count else self.tr("هیچ ردیفی انتخاب نشده", "No rows selected"))
-
-    def bookmark_selected(self):
-        results = self._selected_results() or ([self._selected_result()] if self._selected_result() else [])
-        if not results: self.show_toast(self.tr("یک نتیجه SNI انتخاب کنید", "Select an SNI result"), "warning"); return
-        keys = {(result.carrier, result.edge, result.domain) for result in results}
-        self.storage.bookmarks = [x for x in self.storage.bookmarks
-                                  if (x.get("carrier", ""), x.get("edge", ""), x.get("domain")) not in keys]
-        self.storage.bookmarks.extend(result.to_dict() for result in results); self.storage.save_bookmarks(); self.refresh_bookmarks()
-        self.show_toast(self.tr(f"{len(results)} نتیجه ذخیره شد", f"Saved {len(results)} result(s)"), "success"); self._set_activity("نتیجه‌های SNI ذخیره شدند.", "SNI results saved.", "success", False)
-
-    def refresh_bookmarks(self): self._fill_results(self.bookmarks_table, [ScanResult(**x) for x in self.storage.bookmarks if isinstance(x, dict)])
-
-    def _capture_sni_snapshot(self, profiles):
-        tuning = self.storage.tuning
-        carrier = tuning.carrier_mode
-        scoped_pins = self.storage.settings.get("pattern_profile_sni_pins_by_carrier", {})
-        scoped_globals = self.storage.settings.get("pattern_global_sni_pin_by_carrier", {})
-        return {
-            "carrier": carrier,
-            "profile_ids": [profile.id for profile in profiles],
-            "tuning": tuning.to_dict(),
-            "profile_pins": dict(scoped_pins.get(carrier, {})) if isinstance(scoped_pins, dict) and isinstance(scoped_pins.get(carrier, {}), dict) else {},
-            "global_pin_exists": isinstance(scoped_globals, dict) and carrier in scoped_globals,
-            "global_pin": scoped_globals.get(carrier) if isinstance(scoped_globals, dict) else None,
-        }
-
-    def _restore_sni_snapshot(self, snapshot, persist=True):
-        carrier = snapshot.get("carrier", self.storage.tuning.carrier_mode)
-        carrier_tunings = self.storage.all_carrier_tunings()
-        carrier_tunings[carrier] = Tuning.from_dict(snapshot.get("tuning", {}))
-        scoped_pins = self.storage.settings.get("pattern_profile_sni_pins_by_carrier", {})
-        scoped_pins = dict(scoped_pins) if isinstance(scoped_pins, dict) else {}
-        scoped_pins[carrier] = dict(snapshot.get("profile_pins", {}))
-        self.storage.settings["pattern_profile_sni_pins_by_carrier"] = scoped_pins
-        scoped_globals = self.storage.settings.get("pattern_global_sni_pin_by_carrier", {})
-        scoped_globals = dict(scoped_globals) if isinstance(scoped_globals, dict) else {}
-        if snapshot.get("global_pin_exists"):
-            scoped_globals[carrier] = snapshot.get("global_pin")
-        else:
-            scoped_globals.pop(carrier, None)
-        self.storage.settings["pattern_global_sni_pin_by_carrier"] = scoped_globals
-        active = self.storage.tuning.carrier_mode
-        self.storage.set_carrier_tunings(carrier_tunings, active)
-        if persist:
-            self.storage.save_settings()
-
-    @staticmethod
-    def _bind_verified_sni_route(tuning, result):
-        """Bind only an edge that the edge-aware scanner actually tested."""
-        tuning.pattern_fake_sni = result.domain
-        if not getattr(result, "edge_verified", False) or not result.edge:
-            return tuning
-        previous = [tuning.pattern_connect_ip, *str(tuning.pattern_fallback_ips or "").split(",")]
-        tuning.pattern_connect_ip = result.edge
-        fallbacks = []
-        for value in previous:
-            value = str(value or "").strip()
-            if value and value != result.edge and value not in fallbacks:
-                fallbacks.append(value)
-        tuning.pattern_fallback_ips = ",".join(fallbacks[:4])
-        return tuning
-
-    def _apply_carrier_sni(self, assignments, best_result):
-        carrier = self.storage.tuning.carrier_mode
-        if any(result.carrier and result.carrier != carrier for result in assignments.values()):
-            raise ValueError(self.tr("نتیجه SNI متعلق به اپراتور دیگری است؛ روی اپراتور فعلی دوباره اسکن کنید", "The SNI result belongs to another carrier; scan again on the active carrier"))
-        scoped_pins = self.storage.settings.get("pattern_profile_sni_pins_by_carrier", {})
-        scoped_pins = dict(scoped_pins) if isinstance(scoped_pins, dict) else {}
-        bucket = scoped_pins.get(carrier, {})
-        bucket = dict(bucket) if isinstance(bucket, dict) else {}
-        for profile_id, result in assignments.items():
-            bucket[profile_id] = result.domain
-        scoped_pins[carrier] = bucket
-        scoped_globals = self.storage.settings.get("pattern_global_sni_pin_by_carrier", {})
-        scoped_globals = dict(scoped_globals) if isinstance(scoped_globals, dict) else {}
-        scoped_globals[carrier] = best_result.domain
-        tuning = self._bind_verified_sni_route(self.storage.tuning, best_result)
-        self.storage.settings["pattern_profile_sni_pins_by_carrier"] = scoped_pins
-        self.storage.settings["pattern_global_sni_pin_by_carrier"] = scoped_globals
-        self.storage.set_tuning(tuning)
-
-    def apply_selected_sni(self):
-        result = self._selected_result(); profile = self.storage.selected()
-        if not result or not profile:
-            self.show_toast(self.tr("یک نتیجه SNI و کانفیگ فعال انتخاب کنید", "Select an SNI result and an active config"), "warning"); return
-        if result and profile:
-            self._set_activity("در حال اعمال SNI به کانفیگ فعال…", "Applying SNI to the active config…")
-            snapshot = self._capture_sni_snapshot([profile])
-            try:
-                self._apply_carrier_sni({profile.id: result}, result)
-            except Exception as exc:
-                try: self._restore_sni_snapshot(snapshot)
-                except Exception: pass
-                self.show_toast(self.tr("اعمال SNI ناموفق بود؛ مقادیر قبلی حفظ شدند", "SNI apply failed; previous values were preserved") + f": {exc}", "danger")
-                self.activity_bar.set_activity(self.tr("اعمال SNI ناموفق بود؛ مقادیر قبلی حفظ شدند.", "SNI apply failed; previous values were preserved."), "error", False)
-                return
-            self.sni_undo_snapshot = snapshot; self.undo_apply_btn.setEnabled(True)
-            self.refresh_profiles(); self._append_log(f"Applied repository Fake SNI {result.domain} to {profile.name}")
-            self.show_toast(self.tr("SNI روی کانفیگ فعال اعمال شد", "SNI applied to the active config"), "success", undo=True); self._set_activity("SNI روی کانفیگ فعال اعمال شد.", "SNI applied to the active config.", "success", False)
-
-    def apply_sni_to_all_suggested(self):
-        selected = self._selected_results()
-        mode = "best"
-        if len(selected) > 1:
-            choice = QMessageBox(self); choice.setObjectName("cyberMessageBox"); choice.setWindowTitle("Multiple SNI results selected")
-            choice.setIcon(QMessageBox.Question); choice.setWindowTitle(self.tr("چند نتیجه SNI انتخاب شده", "Multiple SNI results selected")); choice.setText(self.tr("نحوه تخصیص SNIهای انتخاب‌شده به کانفیگ‌های پیشنهادی را انتخاب کنید.", "Choose how the selected SNI results should be assigned to suggested configs."))
-            best_button = choice.addButton(self.tr("استفاده از بهترین امتیاز", "Use Best-Scored"), QMessageBox.AcceptRole)
-            ordered_button = choice.addButton(self.tr("اعمال به ترتیب", "Apply in Order"), QMessageBox.ActionRole)
-            choice.addButton(self.tr("لغو", "Cancel"), QMessageBox.RejectRole); choice.exec()
-            clicked = choice.clickedButton()
-            if clicked is best_button: mode = "best"
-            elif clicked is ordered_button: mode = "ordered"
-            else: return
-        if not selected:
-            source = self.last_results or [ScanResult(**x) for x in self.storage.scan_results if isinstance(x, dict)]
-            if self.scan_tabs.currentIndex() != 0:
-                source = [ScanResult(**x) for x in self.storage.bookmarks if isinstance(x, dict)] or source
-            carrier = self.storage.tuning.carrier_mode
-            source = [result for result in source if not result.carrier or result.carrier == carrier]
-            if not source:
-                self.show_toast(self.tr("هیچ نتیجه SNI برای اعمال وجود ندارد", "No SNI result is available to apply"), "danger")
-                return
-            selected = [max(source, key=lambda result: result.score)]
-
-        confirmation = QMessageBox(self); confirmation.setObjectName("cyberMessageBox"); confirmation.setIcon(QMessageBox.Question)
-        confirmation.setWindowTitle(self.tr("SNI روی همه کانفیگ‌های پیشنهادی اعمال شود؟", "Apply SNI to all suggested configs?"))
-        confirmation.setText(self.tr("این کار مقدار SNI همه کانفیگ‌های پیشنهادی را با نتیجه انتخاب‌شده/بهترین به‌روزرسانی می‌کند.", "This will update the SNI value for all suggested configs using the selected/best result."))
-        cancel = confirmation.addButton(self.tr("لغو", "Cancel"), QMessageBox.RejectRole)
-        apply_button = confirmation.addButton(self.tr("اعمال به همه", "Apply to All"), QMessageBox.AcceptRole)
-        confirmation.exec()
-        if confirmation.clickedButton() is not apply_button: return
-
-        suggested = [
-            profile for profile in self.storage.profiles
-            if profile.origin not in DIRECT_PROFILE_ORIGINS
-        ]
-        if not suggested:
-            self.show_toast(self.tr("کانفیگ پیشنهادی پیدا نشد", "No suggested configs were found"), "warning")
-            return
-        snapshot = self._capture_sni_snapshot(suggested)
-        self._set_activity("در حال اعمال SNI به کانفیگ‌های پیشنهادی…", "Applying SNI to suggested configs…")
-        try:
-            ordered = selected if mode == "ordered" else [max(selected, key=lambda result: result.score)]
-            assignments = {}
-            for index, profile in enumerate(suggested):
-                assignments[profile.id] = ordered[index % len(ordered)]
-            self._apply_carrier_sni(assignments, max(selected, key=lambda result: result.score))
-        except Exception as exc:
-            try: self._restore_sni_snapshot(snapshot)
-            except Exception: pass
-            self.show_toast(self.tr("اعمال SNI ناموفق بود؛ مقادیر قبلی حفظ شدند", "SNI apply failed; previous values were preserved") + f": {exc}", "danger")
-            self.activity_bar.set_activity(self.tr("اعمال SNI ناموفق بود؛ مقادیر قبلی حفظ شدند.", "SNI apply failed; previous values were preserved."), "error", False)
-            return
-        self.sni_undo_snapshot = snapshot; self.undo_apply_btn.setEnabled(True); self.refresh_profiles()
-        self._append_log(f"Applied SNI to {len(suggested)} suggested configs (mode={mode})")
-        self.show_toast(self.tr(f"SNI روی {len(suggested)} کانفیگ پیشنهادی اعمال شد", f"Updated {len(suggested)} suggested configs"), "success", undo=True); self._set_activity(f"SNI روی {len(suggested)} کانفیگ پیشنهادی اعمال شد.", f"Updated {len(suggested)} suggested configs.", "success", False)
-
-    def undo_sni_apply(self):
-        if not self.sni_undo_snapshot: return
-        snapshot = self.sni_undo_snapshot
-        try:
-            if isinstance(snapshot, dict):
-                restored = len(snapshot.get("profile_ids", [])); self._restore_sni_snapshot(snapshot)
-            else:
-                old_values = dict(snapshot)
-                for profile in self.storage.profiles:
-                    if profile.id in old_values: profile.sni = old_values[profile.id]
-                self.storage.save_profiles(); restored = len(old_values)
-            self.refresh_profiles(); self.sni_undo_snapshot = None; self.undo_apply_btn.setEnabled(False)
-            self.show_toast(self.tr(f"تغییرات {restored} کانفیگ برگردانده شد", f"Restored {restored} configs"), "success"); self._set_activity(f"تغییرات {restored} کانفیگ بازگردانده شد.", f"Restored {restored} configs.", "success", False)
-        except Exception as exc:
-            self.show_toast(self.tr("بازگردانی ناموفق بود", "Undo failed") + f": {exc}", "danger")
-
-    def copy_selected_result(self):
-        results = self._selected_results() or ([self._selected_result()] if self._selected_result() else [])
-        if results:
-            QApplication.clipboard().setText("\n".join(f"{result.domain} | {result.resolved_ip} | {result.ping_ms} ms | {result.stability}% | score {result.score}" for result in results))
-            self._set_activity("نتیجه SNI در Clipboard کپی شد.", "SNI result copied to the clipboard.", "success", False)
-
-    def show_toast(self, message, kind="success", undo=False):
+    def show_toast(self, message, kind="success"):
         old = self.centralWidget().findChild(QFrame, "toast")
         if old: old.deleteLater()
         toast = QFrame(self.centralWidget()); toast.setObjectName("toast"); toast.setProperty("kind", kind)
         layout = QHBoxLayout(toast); layout.setContentsMargins(16, 12, 12, 12); layout.setSpacing(12)
         dot = QLabel(); dot.setObjectName("toastDot"); dot.setFixedSize(24, 24); icon_name = {"success": "check-circle", "warning": "alert", "danger": "x-circle"}.get(kind, "check-circle"); icon_color = {"success": "#23f5a6", "warning": "#ffd166", "danger": "#ff5c7c"}.get(kind, "#A855F7"); dot.setPixmap(cyber_pixmap(icon_name, icon_color, 21)); text = QLabel(message); text.setObjectName("toastText"); text.setWordWrap(True)
         layout.addWidget(dot); layout.addWidget(text, 1)
-        if undo:
-            button = QPushButton(self.tr("بازگردانی", "Undo")); button.setObjectName("toastAction"); button.clicked.connect(self.undo_sni_apply); button.clicked.connect(toast.deleteLater); layout.addWidget(button)
         toast.setMaximumWidth(580); toast.setMinimumWidth(360); toast.adjustSize()
         shadow = QGraphicsDropShadowEffect(toast); shadow.setBlurRadius(32); shadow.setOffset(0, 8); shadow.setColor(QColor(0, 0, 0, 150)); toast.setGraphicsEffect(shadow)
         toast.show(); toast.raise_(); self._position_toast(toast)
@@ -7667,7 +6541,6 @@ class MainWindow(QMainWindow):
         for button in self.nav:
             button.setFixedHeight(nav_height)
         self._layout_home_dashboard()
-        self._layout_sni_maker()
         self._position_profile_select_all()
         self._layout_tool_cards(self.width() < 1180)
         self._position_toast()
@@ -7677,9 +6550,7 @@ class MainWindow(QMainWindow):
     def showEvent(self, event):
         super().showEvent(event)
         self._layout_home_dashboard()
-        self._layout_sni_maker()
         QTimer.singleShot(0, self._layout_home_dashboard)
-        QTimer.singleShot(0, self._layout_sni_maker)
         if self._pending_update_notification is not None:
             info = self._pending_update_notification; self._pending_update_notification = None
             QTimer.singleShot(0, lambda value=info: self._show_update_notification(value))
@@ -7796,18 +6667,9 @@ class MainWindow(QMainWindow):
         self._target_latency_generation += 1
         self._target_latency_timer.stop()
         self._bypass_apply_timer.stop()
-        self.scan_cancelled = True; self._scan_cancel_event.set(); self._scan_generation += 1; self._update_generation += 1
-        self._maker_cancel_event.set()
-        self._maker_generation += 1
-        self._maker_import_generation += 1
+        self._update_generation += 1
         self._profile_ping_cancel.set()
         self._profile_ping_generation += 1
-        maker_tester, self._maker_tester = self._maker_tester, None
-        if maker_tester is not None:
-            try:
-                maker_tester.stop()
-            except Exception as exc:
-                self._pending_file_log_lines.append(f"SNI Maker cleanup pending: {exc}")
         try:
             self._cancel_connect_attempt(wait=True, notify=False)
         except Exception as exc:
