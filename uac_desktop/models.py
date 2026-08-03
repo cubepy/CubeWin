@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import dataclasses
+import json
 import re
 import urllib.parse
 import uuid
@@ -296,12 +299,126 @@ class Tuning:
         return cls(**{k: v for k, v in raw.items() if k in valid})
 
 
+def _b64_decode(text: str) -> bytes:
+    compact = "".join(text.split())
+    padded = compact + "=" * (-len(compact) % 4)
+    try:
+        return base64.urlsafe_b64decode(padded)
+    except (binascii.Error, ValueError):
+        return base64.b64decode(padded, validate=False)
+
+
+def _normalize_vmess_uri(raw: str) -> str | None:
+    """Convert a legacy ``vmess://<base64 JSON>`` link into the internal
+    ``vmess://uuid@host:port?...`` shape the rest of the parser understands."""
+    payload = raw[len("vmess://"):]
+    try:
+        data = json.loads(_b64_decode(payload).decode("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    address = str(data.get("add", "")).strip()
+    user_id = str(data.get("id", "")).strip()
+    if not address or not user_id:
+        return None
+    try:
+        port = int(str(data.get("port", 443) or 443).strip())
+    except (TypeError, ValueError):
+        port = 443
+    network = str(data.get("net", "tcp") or "tcp").strip().lower()
+    header_type = str(data.get("type", "") or "").strip()
+    host_header = str(data.get("host", "") or "").strip()
+    path = str(data.get("path", "") or "").strip()
+    tls = str(data.get("tls", "") or "").strip().lower()
+    sni = str(data.get("sni", "") or "").strip() or host_header or address
+    alpn = str(data.get("alpn", "") or "").strip()
+    fingerprint = str(data.get("fp", "") or "").strip()
+    name = str(data.get("ps", "") or "").strip()
+    params = {
+        "type": network,
+        "security": "tls" if tls in {"tls", "reality"} else "none",
+        "aid": str(data.get("aid", 0) or 0),
+        "scy": str(data.get("scy", "") or data.get("cipher", "") or "auto").strip(),
+        "sni": sni,
+    }
+    if host_header:
+        params["host"] = host_header
+    if path:
+        params["path"] = path
+    if alpn:
+        params["alpn"] = alpn
+    if fingerprint:
+        params["fp"] = fingerprint
+    if header_type:
+        params["headerType"] = header_type
+    if network == "grpc" and path:
+        params["serviceName"] = path
+    query = urllib.parse.urlencode(params)
+    fragment = f"#{urllib.parse.quote(name)}" if name else ""
+    user = urllib.parse.quote(user_id, safe="")
+    return f"vmess://{user}@{address}:{port}?{query}{fragment}"
+
+
+def _normalize_shadowsocks_uri(raw: str) -> str | None:
+    """Convert any ``ss://`` variant (SIP002 or the legacy fully-encoded
+    form) into a canonical ``ss://method:password@host:port?...#name`` link
+    that reuses the same userinfo-based parsing as VLESS/Trojan/VMess."""
+    body = raw[len("ss://"):]
+    name = ""
+    if "#" in body:
+        body, fragment = body.split("#", 1)
+        name = urllib.parse.unquote(fragment)
+    if "?" in body:
+        body = body.split("?", 1)[0]
+    method = password = host = ""
+    port = 0
+    if "@" in body:
+        userinfo, hostport = body.rsplit("@", 1)
+        try:
+            decoded = _b64_decode(userinfo).decode("utf-8")
+            method, _, password = decoded.partition(":")
+        except Exception:
+            method, _, password = urllib.parse.unquote(userinfo).partition(":")
+        host, _, port_text = hostport.rpartition(":")
+    else:
+        try:
+            decoded = _b64_decode(body).decode("utf-8")
+        except Exception:
+            return None
+        if "@" not in decoded:
+            return None
+        userinfo, hostport = decoded.rsplit("@", 1)
+        method, _, password = userinfo.partition(":")
+        host, _, port_text = hostport.rpartition(":")
+    try:
+        port = int(port_text)
+    except (TypeError, ValueError):
+        return None
+    if not method or not host or not port:
+        return None
+    user = f"{urllib.parse.quote(method, safe='')}:{urllib.parse.quote(password, safe='')}"
+    fragment = f"#{urllib.parse.quote(name)}" if name else ""
+    return f"ss://{user}@{host}:{port}?type=raw&security=none{fragment}"
+
+
 def parse_uri(uri: str, suggested: bool = False) -> ProxyProfile | None:
     try:
         raw = uri.strip().rstrip("\"'.,;)")
+        protocol = urllib.parse.urlsplit(raw).scheme.lower()
+        if protocol == "vmess" and "@" not in raw.split("://", 1)[-1].split("?", 1)[0].split("#", 1)[0]:
+            normalized = _normalize_vmess_uri(raw)
+            if normalized is None:
+                return None
+            raw = normalized
+        elif protocol == "ss":
+            normalized = _normalize_shadowsocks_uri(raw)
+            if normalized is None:
+                return None
+            raw = normalized
         parsed = urllib.parse.urlsplit(raw)
         protocol = parsed.scheme.lower()
-        if protocol not in {"vless", "trojan", "vmess"} or not parsed.hostname:
+        if protocol not in {"vless", "trojan", "vmess", "ss"} or not parsed.hostname:
             return None
         query = {
             str(key).lower(): str(value)
@@ -349,7 +466,7 @@ def parse_uri(uri: str, suggested: bool = False) -> ProxyProfile | None:
         return None
 
 
-URI_RE = re.compile(r"(?:vless|trojan|vmess)://[^\s]+", re.I)
+URI_RE = re.compile(r"(?:vless|trojan|vmess|ss)://[^\s]+", re.I)
 
 
 def parse_many(text: str, suggested: bool = False) -> list[ProxyProfile]:
@@ -407,6 +524,7 @@ def parse_outbound(profile: ProxyProfile) -> dict:
     ).strip().lower() in {"1", "true", "yes", "on"}
     return {
         "protocol": parsed.scheme.lower(), "user": urllib.parse.unquote(parsed.username or ""),
+        "password": urllib.parse.unquote(parsed.password or ""),
         "host": host, "port": parsed.port or 443, "sni": sni, "host_header": host_header,
         "path": path, "network": network, "fingerprint": query.get("fp") or query.get("fingerprint") or "",
         "pinned": query.get("pinnedpeercertsha256") or query.get("pcs") or "",

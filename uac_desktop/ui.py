@@ -43,7 +43,7 @@ from .app_config import PROJECT_URL, UPDATE_REPOSITORY_URL
 from .engine import Engine, EngineCancelled, format_bytes, mci_quality_score
 from .models import ProxyProfile, Tuning, parse_many
 from .network import (GeoLocation, ScanResult, current_ip, current_location,
-                      profile_ping, profile_real_delay, tcp_ping)
+                      fetch_subscription_uris, profile_ping, profile_real_delay, tcp_ping)
 from .paths import ASSETS, DATA_DIR, LOG_FILE
 from .storage import Storage
 from .icons import icon as cyber_icon, pixmap as cyber_pixmap
@@ -162,7 +162,7 @@ def country_flag_icon(code: str, width: int = 30, height: int = 20) -> QIcon:
     return QIcon(pixmap)
 
 FA_EN = {
-    "خانه": "Home", "کانفیگ‌ها": "Configs", "آزمایشگاه SNI": "SNI Lab",
+    "خانه": "Home", "کانفیگ‌ها": "Configs",
     "لاگ زنده": "Live Logs", "عبور مستقیم برنامه‌ها": "App Bypass", "ابزارها": "Tools", "پشتیبانی": "Support",
     "باز کردن پوشه داده‌ها": "Open Data Folder", "کنترل اتصال": "Connection Center",
     "نسخه دسکتاپ با استفاده از Xray، System Proxy ویندوز و هسته Patterniha Wrong-Sequence": "Desktop engine powered by Xray, Windows System Proxy and the Patterniha wrong-sequence core",
@@ -1636,20 +1636,23 @@ class ProfileDialog(QDialog):
         body = QWidget(); body_layout = QVBoxLayout(body); body_layout.setContentsMargins(24, 20, 24, 20); body_layout.setSpacing(14)
         self.name = QLineEdit(profile.name if profile else "")
         self.name.setPlaceholderText(t("نام قابل تشخیص برای این مسیر", "A recognizable name for this route"))
-        self.uri = QTextEdit(profile.source_uri if profile else ""); self.uri.setObjectName("configEditor"); self.uri.setMinimumHeight(112); self.uri.setPlaceholderText("vless://…  or  trojan://…")
+        self.uri = QTextEdit(profile.source_uri if profile else ""); self.uri.setObjectName("configEditor"); self.uri.setMinimumHeight(112); self.uri.setPlaceholderText("vless://…  trojan://…  vmess://…  ss://…")
         self.address = QLineEdit(profile.address if profile else "104.18.8.83")
         self.fallback = QLineEdit(profile.fallback_address if profile else "104.18.9.83")
         self.port = NumericInput(profile.port if profile else 443, 1, 65535)
         self.sni = QLineEdit(profile.sni if profile else "www.speedtest.net")
         self.fake_sni = QLineEdit(fake_sni or (profile.spoof_fake_sni if profile else ""))
         self.fake_sni.setReadOnly(True)
-        self.fake_sni.setPlaceholderText(t("خودکار از SNI Lab", "Automatic from SNI Lab"))
+        self.fake_sni.setPlaceholderText(t("در زمان اتصال به‌صورت خودکار تنظیم می‌شود", "Set automatically when connecting"))
         self.method = QComboBox(); self.method.addItems(["combined", "fragment", "half", "multi", "sni_split"])
         self.method.setCurrentText(profile.method if profile else "combined")
         for technical in (self.uri, self.address, self.fallback, self.port, self.sni, self.fake_sni, self.method): technical.setLayoutDirection(Qt.LeftToRight)
-        self.validation = QLabel(t("یک لینک معتبر VLESS یا Trojan وارد کنید.", "Enter a valid VLESS or Trojan URI.")); self.validation.setObjectName("validationError"); self.validation.setVisible(False)
+        self.validation = QLabel(t(
+            "یک لینک معتبر VLESS، Trojan، VMess یا Shadowsocks وارد کنید. برای لینک اشتراک (subscription) از دکمه «ورود از Clipboard» استفاده کنید.",
+            "Enter a valid VLESS, Trojan, VMess, or Shadowsocks URI. For a subscription link, use \"Import Clipboard\" instead.",
+        )); self.validation.setObjectName("validationError"); self.validation.setWordWrap(True); self.validation.setVisible(False)
 
-        identity = self._section(t("هویت و لینک", "Identity & URI"), t("نام نمایشی و لینک اصلی کانفیگ", "Display name and original config URI"), [(t("نام", "Name"), self.name), (t("لینک VLESS / Trojan", "VLESS / Trojan URI"), self.uri)])
+        identity = self._section(t("هویت و لینک", "Identity & URI"), t("نام نمایشی و لینک اصلی کانفیگ", "Display name and original config URI"), [(t("نام", "Name"), self.name), (t("لینک کانفیگ", "Config URI"), self.uri)])
         identity.layout().addWidget(self.validation)
         route = self._section(t("مسیر اتصال", "Connection Route"), t("مقادیر فنی برای Edge، SNI و روش انتقال", "Technical edge, SNI and transport values"), [(t("IP اصلی", "Primary IP"), self.address), (t("IP جایگزین", "Fallback IP"), self.fallback), (t("پورت", "Port"), self.port), (t("SNI سرور کانفیگ", "Config Server SNI"), self.sni), (t("SNI جعلی فعال", "Active Fake SNI"), self.fake_sni), (t("روش", "Method"), self.method)])
         body_layout.addWidget(identity); body_layout.addWidget(route); body_layout.addStretch(); scroll.setWidget(body); layout.addWidget(scroll, 1)
@@ -1736,6 +1739,10 @@ class _CubeAccountWorker(QObject):
 
 class _CubeImportWorker(QObject):
     done = Signal(object, bool)
+
+
+class _SubscriptionImportWorker(QObject):
+    done = Signal(object, str)
 
 
 class CubeLoginDialog(QDialog):
@@ -2060,7 +2067,7 @@ class TuningDialog(QDialog):
              (self.t(f"{ltr_isolate('IP')}های جایگزین", "Fallback edge IPs"), self.fallback_ips,
               self.t("فقط بعد از شکست Edge اصلی امتحان می‌شوند؛ فهرست بلند زمان شکست را افزایش می‌دهد.", "Tried only after the primary edge fails; long lists increase worst-case failover time.")),
              (self.t(f"{ltr_isolate('SNI')} جعلی", "Fake SNI"), self.fake_sni,
-              self.t("نام TLS/Host است و لازم نیست IP آن با Edge یکی باشد. SNI Lab زوج دقیق Edge + SNI را آزمایش می‌کند.", "This is the TLS/Host name and its DNS IP need not equal the edge. SNI Lab tests the exact edge + SNI pair.")),
+              self.t("نام TLS/Host است و لازم نیست IP آن با Edge یکی باشد.", "This is the TLS/Host name and its DNS IP need not equal the edge.")),
              (self.t("مسیرهای پروفایل", "Profile edges"), self.profile_edges,
               self.t("IPهای داخل کانفیگ را قبل از Edgeهای عمومی امتحان می‌کند؛ فقط برای پروفایل‌های مطمئن فعال کنید.", "Tries profile IPs before global edges; enable only for trusted profiles."))],
             self.t("SNI خوب باید با تست واقعی صفحه تأیید شود؛ Ping تنها معیار انتخاب نیست.", "A good SNI must pass real page traffic; ping alone is not used as proof.")))
@@ -2237,6 +2244,7 @@ class MainWindow(QMainWindow):
         self.storage = Storage(); self.language = self.storage.settings.get("language", "fa"); self.bridge = Bridge(); self.connecting = False; self.connection_error = ""; self._toast_timer = None
         self._cube_account_worker = _CubeAccountWorker(); self._cube_account_worker.done.connect(self._on_cube_account_fetched)
         self._cube_import_worker = _CubeImportWorker(); self._cube_import_worker.done.connect(self._on_cube_import_done)
+        self._subscription_import_worker = _SubscriptionImportWorker(); self._subscription_import_worker.done.connect(self._on_subscription_import_done)
         self._update_generation = 0; self._update_in_progress = False; self._latest_update: UpdateInfo | None = None
         self._update_notification = None; self._update_notification_timer = None; self._update_notification_animation = None; self._pending_update_notification = None
         self._closing = False
@@ -2325,8 +2333,6 @@ class MainWindow(QMainWindow):
         header_meta = {
             "Connection Center": ("shield", "فرماندهی شبکه", "NETWORK COMMAND"),
             "Configs": ("file-cog", "مدیریت مسیرها", "ROUTE LIBRARY"),
-            "SNI Config Maker": ("sparkles", "ساخت و اعتبارسنجی", "CONFIG FACTORY"),
-            "SNI Lab": ("flask", "آزمایش و رتبه‌بندی", "SIGNAL LABORATORY"),
             "Live Logs": ("activity", "رویدادهای زنده", "LIVE TELEMETRY"),
             "App Bypass": ("route", "مسیریابی برنامه‌ها", "APPLICATION ROUTING"),
             "Network Tools": ("wrench", "ابزارهای تشخیص", "DIAGNOSTIC TOOLKIT"),
@@ -2619,7 +2625,7 @@ class MainWindow(QMainWindow):
     def _configs_page(self):
         page = QWidget(); root = QVBoxLayout(page); root.setContentsMargins(34, 28, 34, 26); root.setSpacing(15)
         self.config_count_label = QLabel("0"); self.config_count_label.setObjectName("summaryPill"); self.config_count_label.setAlignment(Qt.AlignCenter)
-        root.addWidget(self._page_header("کانفیگ‌ها", "Configs", "مدیریت کامل لینک‌های VLESS و Trojan", "Manage, rank, import and edit VLESS and Trojan profiles", self.config_count_label))
+        root.addWidget(self._page_header("کانفیگ‌ها", "Configs", "مدیریت لینک‌های VLESS، Trojan، VMess و Shadowsocks", "Manage, rank, import and edit VLESS, Trojan, VMess, and Shadowsocks profiles", self.config_count_label))
         toolbar = QFrame(); toolbar.setObjectName("pageToolbar"); bar = QHBoxLayout(toolbar); bar.setContentsMargins(12, 10, 12, 10); bar.setSpacing(9)
         self.account_btn = self._action_button("ورود به حساب", "Sign In", "lock", "secondaryAction")
         self.account_btn.clicked.connect(self._account_button_clicked)
@@ -2904,8 +2910,8 @@ class MainWindow(QMainWindow):
         info_grid = QGridLayout(); info_grid.setSpacing(14)
         support_cards = [
             ("activity", "مشکل اتصال دارید؟", "Connection problem?", "ابتدا Activity Bar و سپس Live Logs را بررسی کنید؛ خطای واقعی مسیر همان‌جا نمایش داده می‌شود.", "Check the Activity Bar first, then Live Logs for the real route error."),
-            ("database", "کانفیگ پیشنهادی", "Suggested configs", "در صفحه Configs همگام‌سازی را اجرا کنید؛ بهترین نتایج تست‌شده در بالای فهرست قرار می‌گیرند.", "Run Sync in Configs; verified, best-scored profiles are ranked first."),
-            ("flask", "بهترین SNI", "Best SNI", "SNI Lab فقط نتیجه‌های واقعی اسکن را ذخیره می‌کند و برای اتصال خودکار پیشنهاد می‌دهد.", "SNI Lab stores real scan results and makes them available to Auto Mode."),
+            ("lock", "کانفیگ‌های حساب شما", "Your account's configs", "از صفحه Configs وارد حساب کیوب‌وی‌پی‌ان شوید تا سرویس‌های خریداری‌شده‌تان مستقیماً به User Config اضافه شوند.", "Sign in with your CubeVPN account on the Configs page to add your purchased services straight into User Config."),
+            ("gauge", "انتخاب بهترین کانفیگ", "Pick the best config", "گزینه «انتخاب بهترین کانفیگ از لیست» را در صفحه اصلی روشن کنید تا اتصال خودکار سالم‌ترین کانفیگ فهرست شما را انتخاب کند.", "Enable \"Pick Best in List\" on Home so Auto Mode always connects your healthiest config."),
         ]
         for index, (icon_name, fa_title, en_title, fa_body, en_body) in enumerate(support_cards):
             box = MotionFrame(); box.setObjectName("helpCard"); l = QVBoxLayout(box); l.setContentsMargins(18, 17, 18, 17); l.setSpacing(9); icon_label = QLabel(); icon_label.setObjectName("helpIcon"); icon_label.setPixmap(cyber_pixmap(icon_name, "#C026D3", 23)); icon_label.setFixedSize(38, 38); icon_label.setAlignment(Qt.AlignCenter); title = self._bind_text(QLabel(), fa_title, en_title); title.setObjectName("helpTitle"); text = self._bind_text(QLabel(), fa_body, en_body); text.setObjectName("helpText"); text.setWordWrap(True); text.setTextInteractionFlags(Qt.TextSelectableByMouse); l.addWidget(icon_label); l.addWidget(title); l.addWidget(text); l.addStretch(); info_grid.addWidget(box, 0, index)
@@ -4522,19 +4528,6 @@ class MainWindow(QMainWindow):
             self._set_state(False)
         QTimer.singleShot(120, self._start_selected_country)
 
-    def _route_source_changed(self, _index):
-        source = self._selected_route_source()
-        self.storage.settings["route_source"] = source
-        self.storage.save_settings()
-        self._refresh_country_selector()
-        self._sync_auto_mode_ui(select_profile=True)
-        title = "User Config" if source == "user-config" else self.tr("پیشنهادی", "Suggested")
-        self._set_activity(
-            f"منبع اتصال خودکار روی {title} تنظیم شد.",
-            f"Auto connection source set to {title}.",
-            "success", False,
-        )
-
     def _start_selected_country(self):
         if (not self._closing and self.auto_mode.isChecked()
                 and self._selected_country_code() and not self.connecting
@@ -5142,8 +5135,38 @@ class MainWindow(QMainWindow):
 
     def import_clipboard(self):
         self._set_activity("در حال وارد کردن کانفیگ…", "Importing config…")
-        profiles = parse_many(QApplication.clipboard().text())
-        if not profiles: self._handle_error(self.tr("کانفیگ معتبری در Clipboard پیدا نشد", "No valid config was found in the clipboard")); return
+        text = QApplication.clipboard().text()
+        profiles = parse_many(text)
+        if profiles:
+            self._finish_clipboard_import(profiles)
+            return
+        url = text.strip()
+        if not (url.startswith("http://") or url.startswith("https://")):
+            self._handle_error(self.tr("کانفیگ یا لینک اشتراک معتبری در Clipboard پیدا نشد", "No valid config or subscription link was found in the clipboard"))
+            return
+        self._set_activity("در حال دریافت لیست اشتراک…", "Fetching subscription list…")
+        self.clip_btn.setEnabled(False)
+
+        def work():
+            try:
+                uris = fetch_subscription_uris(url)
+                self._subscription_import_worker.done.emit(parse_many("\n".join(uris)), "")
+            except Exception as exc:
+                self._subscription_import_worker.done.emit([], str(exc))
+
+        threading.Thread(target=work, name="import-subscription", daemon=True).start()
+
+    def _on_subscription_import_done(self, profiles, error):
+        self.clip_btn.setEnabled(True)
+        if error:
+            self._handle_error(self.tr("امکان دریافت لیست اشتراک نبود", "Could not fetch the subscription list"))
+            return
+        if not profiles:
+            self._handle_error(self.tr("کانفیگ معتبری در لینک اشتراک پیدا نشد", "No valid configs were found at the subscription link"))
+            return
+        self._finish_clipboard_import(profiles)
+
+    def _finish_clipboard_import(self, profiles):
         existing = {x.source_uri.split("#")[0] for x in self.storage.profiles}; profiles = [x for x in profiles if x.source_uri.split("#")[0] not in existing]
         self.storage.profiles.extend(profiles); self.storage.save_profiles(); self.refresh_profiles(); self.show_toast(self.tr(f"{len(profiles)} کانفیگ اضافه شد", f"Added {len(profiles)} config(s)"), "success"); self._set_activity("ورود کانفیگ کامل شد.", "Config import completed.", "success", False)
 

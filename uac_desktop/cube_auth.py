@@ -7,7 +7,6 @@ CubeVPN client speaks the same backend contract.
 
 from __future__ import annotations
 
-import base64
 from dataclasses import dataclass, field
 
 import requests
@@ -15,6 +14,13 @@ import requests
 from .app_config import CUBE_API_BASE_URL
 
 _TIMEOUT = 12
+
+# Talks to the account API directly, never through the local VPN tunnel —
+# trust_env=False keeps it from inheriting the Windows System Proxy this app
+# itself sets while connected (which can include a SOCKS entry requests
+# can't use without PySocks).
+_session = requests.Session()
+_session.trust_env = False
 
 
 @dataclass
@@ -95,7 +101,7 @@ def _send(method: str, path: str, body: dict | None = None, token: str | None = 
     if token:
         headers["Authorization"] = f"Bearer {token}"
     try:
-        response = requests.request(
+        response = _session.request(
             method, base + path, json=body, headers=headers, timeout=_TIMEOUT,
         )
         text = response.text
@@ -164,26 +170,12 @@ def logout(token: str) -> None:
         pass
 
 
-def _try_base64_decode(text: str) -> str | None:
-    compact = "".join(text.split())
-    if not compact:
-        return None
-    padded = compact + "=" * (-len(compact) % 4)
-    try:
-        return base64.b64decode(padded, validate=False).decode("utf-8", errors="ignore")
-    except Exception:
-        return None
-
-
 def fetch_subscription_uris(url: str, timeout: int = 15) -> list[str]:
     """Fetch a v2ray-style subscription link and return its config URIs.
 
-    The body is base64-encoded newline-separated URIs by convention; plain
-    newline-separated URIs are accepted too.
+    Delegates to :mod:`uac_desktop.network`, which every other subscription
+    consumer in the app (manual "Import from Clipboard") also uses.
     """
-    response = requests.get(url, timeout=timeout)
-    response.raise_for_status()
-    text = response.text.strip()
-    decoded = _try_base64_decode(text)
-    body = decoded if decoded is not None else text
-    return [line.strip() for line in body.splitlines() if line.strip()]
+    from . import network
+
+    return network.fetch_subscription_uris(url, timeout=timeout)

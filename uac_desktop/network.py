@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import concurrent.futures
 import socket
 import ssl
@@ -284,8 +285,38 @@ def scan_domains(domains: list[str], threads: int, tries: int, timeout: int, pro
 
 def current_ip(proxy: bool = False) -> str:
     proxies = {"http": "http://127.0.0.1:20809", "https": "http://127.0.0.1:20809"} if proxy else None
-    response = requests.get("https://api.ipify.org?format=json", proxies=proxies, timeout=8)
+    session = requests.Session()
+    session.trust_env = False
+    response = session.get("https://api.ipify.org?format=json", proxies=proxies, timeout=8)
     return response.json().get("ip", "unknown")
+
+
+def _try_base64_decode(text: str) -> str | None:
+    compact = "".join(text.split())
+    if not compact:
+        return None
+    padded = compact + "=" * (-len(compact) % 4)
+    try:
+        return base64.b64decode(padded, validate=False).decode("utf-8", errors="ignore")
+    except Exception:
+        return None
+
+
+def fetch_subscription_uris(url: str, timeout: int = 15) -> list[str]:
+    """Fetch a v2ray-style subscription link and return its config URIs.
+
+    The body is base64-encoded newline-separated URIs by convention; plain
+    newline-separated URIs are accepted too. Connects directly (never through
+    the local VPN tunnel or the Windows System Proxy this app may have set).
+    """
+    session = requests.Session()
+    session.trust_env = False
+    response = session.get(url, timeout=timeout)
+    response.raise_for_status()
+    text = response.text.strip()
+    decoded = _try_base64_decode(text)
+    body = decoded if decoded is not None else text
+    return [line.strip() for line in body.splitlines() if line.strip()]
 
 
 def current_location(proxy: bool = False, timeout: float = 5.0) -> GeoLocation | None:
