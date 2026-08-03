@@ -827,6 +827,10 @@ def build_xray_config(profile: ProxyProfile, bypass_processes: list[str] | None 
                                "users": [{"id": parsed["user"],
                                           "alterId": parsed["alter_id"],
                                           "security": parsed["user_security"]}]}]}
+    elif parsed["protocol"] == "ss":
+        settings = {"servers": [{"address": upstream_address or parsed["host"],
+                                  "port": parsed["port"], "method": parsed["user"],
+                                  "password": parsed["password"]}]}
     else:
         raise ValueError(f"Unsupported protocol: {parsed['protocol']}")
     stream = {
@@ -903,8 +907,9 @@ def build_xray_config(profile: ProxyProfile, bypass_processes: list[str] | None 
         "normal": "warning", "minimal": "warning", "warning": "warning",
         "error": "error", "none": "none",
     }.get(requested_log_level, "warning")
+    xray_protocol_name = {"ss": "shadowsocks"}.get(parsed["protocol"], parsed["protocol"])
     proxy_outbound = {
-        "tag": "proxy", "protocol": parsed["protocol"], "settings": settings,
+        "tag": "proxy", "protocol": xray_protocol_name, "settings": settings,
         "streamSettings": stream,
     }
     if (
@@ -1666,6 +1671,9 @@ class Engine:
             direct_reality = (
                 profile.route_mode == "reality-direct"
                 or parsed_outbound["security"] == "reality"
+                # Shadowsocks never sends a TLS ClientHello, so there is
+                # nothing for the Patterniha fragmenter to act on.
+                or parsed_outbound["protocol"] == "ss"
             )
             upstream_address = resolve_xray_upstream(profile)
             self._check_cancel(cancel_event)

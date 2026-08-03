@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import threading
 import time
 
@@ -280,3 +281,83 @@ def test_current_location_uses_tunnel_proxy_and_returns_geo_country(monkeypatch)
     )
     assert calls[0][1]["proxies"]["https"] == "http://127.0.0.1:20809"
     assert calls[0][1]["timeout"] == 3.5
+
+
+def test_current_ip_disables_trust_env_so_it_ignores_the_system_socks_proxy(monkeypatch):
+    calls = []
+    sessions = []
+
+    class Response:
+        def json(self):
+            return {"ip": "203.0.113.9"}
+
+    class Session:
+        trust_env = True
+
+        def __init__(self):
+            sessions.append(self)
+
+        def get(self, url, **kwargs):
+            calls.append((url, kwargs))
+            return Response()
+
+    monkeypatch.setattr(network.requests, "Session", Session)
+
+    result = network.current_ip(proxy=True)
+
+    assert result == "203.0.113.9"
+    assert sessions[0].trust_env is False
+    assert calls[0][1]["proxies"] == {
+        "http": "http://127.0.0.1:20809", "https": "http://127.0.0.1:20809",
+    }
+
+
+def test_fetch_subscription_uris_decodes_base64(monkeypatch):
+    body = "vless://a@example.com:443?security=tls#one\ntrojan://b@example.com:443?security=tls#two"
+    encoded = base64.b64encode(body.encode("utf-8")).decode("ascii")
+    sessions = []
+
+    class Response:
+        text = encoded
+
+        def raise_for_status(self):
+            pass
+
+    class Session:
+        trust_env = True
+
+        def __init__(self):
+            sessions.append(self)
+
+        def get(self, url, **kwargs):
+            return Response()
+
+    monkeypatch.setattr(network.requests, "Session", Session)
+
+    uris = network.fetch_subscription_uris("https://sub.example/a")
+
+    assert uris == [
+        "vless://a@example.com:443?security=tls#one",
+        "trojan://b@example.com:443?security=tls#two",
+    ]
+    assert sessions[0].trust_env is False
+
+
+def test_fetch_subscription_uris_accepts_plain_text(monkeypatch):
+    class Response:
+        text = "not-base64-!!!\nvless://x@y:443#z"
+
+        def raise_for_status(self):
+            pass
+
+    class Session:
+        trust_env = True
+
+        def get(self, url, **kwargs):
+            return Response()
+
+    monkeypatch.setattr(network.requests, "Session", Session)
+
+    uris = network.fetch_subscription_uris("https://sub.example/a")
+
+    assert uris == ["not-base64-!!!", "vless://x@y:443#z"]

@@ -1,4 +1,3 @@
-import base64
 import json
 
 import pytest
@@ -53,7 +52,7 @@ def test_request_code_success(monkeypatch):
         captured["headers"] = headers
         return _envelope_response({"ok": True, "cooldown_seconds": 45})
 
-    monkeypatch.setattr(cube_auth.requests, "request", fake_request)
+    monkeypatch.setattr(cube_auth._session, "request", fake_request)
 
     result = cube_auth.request_code("09120000000")
 
@@ -68,7 +67,7 @@ def test_request_code_success(monkeypatch):
 def test_request_code_error_envelope(monkeypatch):
     monkeypatch.setattr(cube_auth, "CUBE_API_BASE_URL", "https://api.example.com")
     monkeypatch.setattr(
-        cube_auth.requests, "request",
+        cube_auth._session, "request",
         lambda *a, **k: _envelope_response({"ok": False, "error": "rate_limited", "message": "Too many requests"}),
     )
 
@@ -82,7 +81,7 @@ def test_request_code_error_envelope(monkeypatch):
 def test_verify_code_success_defaults_identifier_when_missing(monkeypatch):
     monkeypatch.setattr(cube_auth, "CUBE_API_BASE_URL", "https://api.example.com")
     monkeypatch.setattr(
-        cube_auth.requests, "request",
+        cube_auth._session, "request",
         lambda *a, **k: _envelope_response({
             "ok": True, "token": "tok-123",
             "user": {"id": "u1", "display_name": "Reza"},
@@ -100,7 +99,7 @@ def test_verify_code_success_defaults_identifier_when_missing(monkeypatch):
 def test_verify_code_malformed_response_without_token(monkeypatch):
     monkeypatch.setattr(cube_auth, "CUBE_API_BASE_URL", "https://api.example.com")
     monkeypatch.setattr(
-        cube_auth.requests, "request",
+        cube_auth._session, "request",
         lambda *a, **k: _envelope_response({"ok": True}),
     )
 
@@ -126,7 +125,7 @@ def test_fetch_account_parses_services_and_sends_bearer_token(monkeypatch):
             ],
         })
 
-    monkeypatch.setattr(cube_auth.requests, "request", fake_request)
+    monkeypatch.setattr(cube_auth._session, "request", fake_request)
 
     result = cube_auth.fetch_account("tok-123")
 
@@ -143,7 +142,7 @@ def test_send_handles_network_exception(monkeypatch):
     def raise_connection_error(*a, **k):
         raise requests.ConnectionError("boom")
 
-    monkeypatch.setattr(cube_auth.requests, "request", raise_connection_error)
+    monkeypatch.setattr(cube_auth._session, "request", raise_connection_error)
 
     result = cube_auth.request_code("09120000000")
 
@@ -152,28 +151,16 @@ def test_send_handles_network_exception(monkeypatch):
     assert "boom" in result.message
 
 
-def test_fetch_subscription_uris_decodes_base64(monkeypatch):
-    body = "vless://a@example.com:443?security=tls#one\ntrojan://b@example.com:443?security=tls#two"
-    encoded = base64.b64encode(body.encode("utf-8")).decode("ascii")
+def test_fetch_subscription_uris_delegates_to_the_shared_network_helper(monkeypatch):
+    from uac_desktop import network
+
+    calls = []
     monkeypatch.setattr(
-        cube_auth.requests, "get",
-        lambda url, timeout=None: _FakeResponse(status_code=200, text=encoded),
+        network, "fetch_subscription_uris",
+        lambda url, timeout=15: calls.append((url, timeout)) or ["vless://a@example.com:443#one"],
     )
 
     uris = cube_auth.fetch_subscription_uris("https://sub.example/a")
 
-    assert uris == [
-        "vless://a@example.com:443?security=tls#one",
-        "trojan://b@example.com:443?security=tls#two",
-    ]
-
-
-def test_fetch_subscription_uris_accepts_plain_text(monkeypatch):
-    monkeypatch.setattr(
-        cube_auth.requests, "get",
-        lambda url, timeout=None: _FakeResponse(status_code=200, text="not-base64-!!!\nvless://x@y:443#z"),
-    )
-
-    uris = cube_auth.fetch_subscription_uris("https://sub.example/a")
-
-    assert uris == ["not-base64-!!!", "vless://x@y:443#z"]
+    assert uris == ["vless://a@example.com:443#one"]
+    assert calls == [("https://sub.example/a", 15)]
