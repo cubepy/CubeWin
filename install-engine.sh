@@ -96,15 +96,16 @@ fi
 chmod +x "$BIN/sing-box" 2>/dev/null || true
 unquarantine "$BIN/sing-box"
 if [ ! -x "$BIN/sing-box" ]; then
-  echo "sing-box was downloaded but is not executable: $BIN/sing-box" >&2
-  exit 1
+  echo "WARNING: $BIN/sing-box is not executable. TUN Mode will be unavailable." >&2
+elif ! "$BIN/sing-box" version 2>/dev/null | head -1; then
+  echo "WARNING: $BIN/sing-box would not run. TUN Mode will be unavailable." >&2
 fi
-"$BIN/sing-box" version | head -1
 
 echo
 echo "Engine binaries are in $BIN."
-echo "Note: the spoofing core is Windows-only. Running the app here gives you"
-echo "the interface and everything around it, not a working tunnel."
+echo "Note: WinDivert wrong-sequence injection is Windows-only, so this host"
+echo "uses TLS fragmentation instead. The tunnel works; Windows System Proxy,"
+echo "TUN Mode and Mobile Gateway do not, and appear disabled in the app."
 
 if [ "$XRAY_OK" -ne 1 ]; then
   echo >&2
