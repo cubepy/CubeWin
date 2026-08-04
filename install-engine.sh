@@ -26,6 +26,7 @@ case "$(uname -m)" in
 esac
 
 echo "Target: $OS-$ARCH"
+XRAY_OK=1
 
 # Downloads here routinely cross unreliable links — a partial transfer that
 # aborts the script is the common failure, not a missing file. Retry, resume
@@ -35,6 +36,15 @@ download() {
   curl -fL --retry 5 --retry-delay 3 --retry-all-errors \
        --connect-timeout 20 --speed-time 60 --speed-limit 1024 \
        -C - -o "$out" "$url"
+}
+
+# macOS tags anything curl downloads with com.apple.quarantine, and Gatekeeper
+# then refuses to execute it. Without this the binary is present, executable,
+# and still unusable.
+unquarantine() {
+  [ "$OS" = "macos" ] || return 0
+  xattr -d com.apple.quarantine "$1" 2>/dev/null || true
+  xattr -c "$1" 2>/dev/null || true
 }
 
 # --- Xray -------------------------------------------------------------------
@@ -57,11 +67,15 @@ if [ ! -x "$BIN/xray" ]; then
   rm -rf "$tmp"
 fi
 chmod +x "$BIN/xray" 2>/dev/null || true
+unquarantine "$BIN/xray"
 if [ ! -x "$BIN/xray" ]; then
   echo "xray was downloaded but is not executable: $BIN/xray" >&2
   exit 1
 fi
-"$BIN/xray" version | head -1
+if ! "$BIN/xray" version 2>/dev/null | head -1; then
+  echo "WARNING: $BIN/xray would not run. Continuing so the rest still installs." >&2
+  XRAY_OK=0
+fi
 
 # --- sing-box ---------------------------------------------------------------
 SING_VERSION=1.13.14
@@ -80,6 +94,7 @@ if [ ! -x "$BIN/sing-box" ]; then
   rm -rf "$tmp"
 fi
 chmod +x "$BIN/sing-box" 2>/dev/null || true
+unquarantine "$BIN/sing-box"
 if [ ! -x "$BIN/sing-box" ]; then
   echo "sing-box was downloaded but is not executable: $BIN/sing-box" >&2
   exit 1
@@ -90,3 +105,10 @@ echo
 echo "Engine binaries are in $BIN."
 echo "Note: the spoofing core is Windows-only. Running the app here gives you"
 echo "the interface and everything around it, not a working tunnel."
+
+if [ "$XRAY_OK" -ne 1 ]; then
+  echo >&2
+  echo "xray is installed but did not run. On macOS this is usually Gatekeeper:" >&2
+  echo "  xattr -cr '$BIN'" >&2
+  exit 1
+fi

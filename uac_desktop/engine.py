@@ -1091,8 +1091,13 @@ def _not_executable_message(path) -> str:
     act on. This is the normal outcome when install-engine.sh is interrupted
     mid-run — the file is copied before it is made executable.
     """
-    return (f"{path} is not executable. The engine download was probably "
-            f"interrupted. Fix it with:  chmod +x '{path}'   "
+    fix = f"chmod +x '{path}'"
+    if platform.system() == "Darwin":
+        # Gatekeeper blocks curl-downloaded binaries even once they are +x, and
+        # chmod alone leaves the user stuck with the same failure.
+        fix += f" && xattr -cr '{path.parent}'"
+    return (f"{path} cannot be executed. The engine download was probably "
+            f"interrupted. Fix it with:  {fix}   "
             f"(or re-run install-engine.sh / install-engine.ps1)")
 
 

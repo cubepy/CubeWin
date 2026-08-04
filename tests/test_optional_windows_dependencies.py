@@ -121,7 +121,7 @@ def test_a_non_executable_engine_binary_says_how_to_fix_it(tmp_path, monkeypatch
         engine._binary()
 
     message = str(caught.value)
-    assert "not executable" in message
+    assert "cannot be executed" in message
     assert "chmod +x" in message, "the message has to carry the fix"
     assert str(binary) in message
 
