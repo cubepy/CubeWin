@@ -1,5 +1,5 @@
 from uac_desktop.app_config import UPDATE_REPOSITORY_URL
-from uac_desktop.storage import Storage
+from uac_desktop.storage import _UPDATE_REPOSITORY_VERSION, Storage
 
 
 def _run_migration(settings):
@@ -25,7 +25,7 @@ def test_android_repository_is_migrated_and_stale_cache_is_cleared():
     })
 
     assert settings["update_repo_url"] == UPDATE_REPOSITORY_URL
-    assert settings["update_repository_version"] == 1
+    assert settings["update_repository_version"] == _UPDATE_REPOSITORY_VERSION
     assert not set(settings).intersection({
         "last_update_checked_at", "latest_version", "latest_tag",
         "latest_release_name", "latest_release_url", "update_available",
@@ -38,7 +38,7 @@ def test_missing_repository_uses_windows_repository():
     settings = _run_migration({})
 
     assert settings["update_repo_url"] == UPDATE_REPOSITORY_URL
-    assert settings["update_repository_version"] == 1
+    assert settings["update_repository_version"] == _UPDATE_REPOSITORY_VERSION
 
 
 def test_custom_repository_is_preserved():
@@ -50,4 +50,4 @@ def test_custom_repository_is_preserved():
 
     assert settings["update_repo_url"] == custom
     assert settings["latest_version"] == "9.9.9"
-    assert settings["update_repository_version"] == 1
+    assert settings["update_repository_version"] == _UPDATE_REPOSITORY_VERSION

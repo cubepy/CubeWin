@@ -16,12 +16,16 @@ _BUNDLED_CONFIG_ORIGINS = ("builtin", "verified")
 _IO_LOCK = threading.RLock()
 _SPEED_CORE_VERSION = 3
 _CARRIER_TUNING_VERSION = 2
-_UPDATE_REPOSITORY_VERSION = 1
+_UPDATE_REPOSITORY_VERSION = 2
 _VERIFIED_CONFIGS_VERSION = 5
 _CARRIERS = ("auto", "mci", "irancell")
 _LEGACY_UPDATE_REPOSITORIES = {
     f"https://github.com/floxu1/uac-sni-spoofer-{platform}"
     for platform in ("android", "androids")
+} | {
+    # Renamed to cubepy/CubeWin. Settings written before the rename still point
+    # at the old slug, so migrate them and drop the cached release info.
+    "https://github.com/cubepy/uac-sni-spoofer-windows",
 }
 _UPDATE_CACHE_KEYS = (
     "last_update_checked_at",

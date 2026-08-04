@@ -27,6 +27,7 @@ from typing import Callable
 from pydivert import Flag, Packet, WinDivert
 
 from .packet_templates import ClientHelloMaker
+from ..platform_support import detect as detect_host, unsupported_message
 from ..tls_tools import fragments
 
 
@@ -163,6 +164,13 @@ class PacketInjector:
         if self.error:
             if isinstance(self.error, PermissionError):
                 raise RuntimeError("Pattern core requires Administrator access for WinDivert") from self.error
+            # A driver that will not load on an ARM64 machine reports a generic
+            # OS error. Lead with the architecture when that is the real cause,
+            # so the log does not send the user hunting for a missing DLL.
+            host = detect_host()
+            if not host.supported:
+                _persian, english = unsupported_message(host)
+                raise RuntimeError(f"{english} (WinDivert: {self.error})") from self.error
             raise RuntimeError(f"Pattern core WinDivert failed: {self.error}") from self.error
 
     def _run(self) -> None:
@@ -392,8 +400,10 @@ class PatternSniCore:
 
     def start(self, profile, tuning, forced_strategy: str | None = None) -> None:
         self.stop()
-        if os.name != "nt":
-            raise RuntimeError("Pattern core currently requires Windows/WinDivert")
+        host = detect_host()
+        if not host.supported:
+            _persian, english = unsupported_message(host)
+            raise RuntimeError(english)
         self._profile = profile
         self._strategy_override = str(forced_strategy or "wrong_seq").strip().lower()
         self._quality = Quality.from_tuning(tuning)

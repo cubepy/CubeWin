@@ -1,7 +1,10 @@
 from . import __version__
 
 
-UPDATE_REPOSITORY_URL = "https://github.com/cubepy/UAC-SNI-Spoofer-Windows"
+# The repository was renamed from UAC-SNI-Spoofer-Windows. GitHub still
+# redirects the old path, but its API answers with the new name — keep this
+# in step with the rename or every update check fails validation.
+UPDATE_REPOSITORY_URL = "https://github.com/cubepy/CubeWin"
 CURRENT_VERSION = __version__
 
 

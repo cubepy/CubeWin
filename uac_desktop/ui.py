@@ -5,6 +5,7 @@ import concurrent.futures
 import ctypes
 import html
 import math
+import platform
 import re
 import socket
 import ssl
@@ -45,6 +46,8 @@ from .models import ProxyProfile, Tuning, parse_many
 from .network import (GeoLocation, ScanResult, current_ip, current_location,
                       fetch_subscription_uris, profile_ping, profile_real_delay, tcp_ping)
 from .paths import ASSETS, DATA_DIR, LOG_FILE
+from .platform_support import (SUPPORTED as SUPPORTED_ARCHITECTURE,
+                               detect as detect_host, unsupported_message)
 from .storage import Storage
 from .icons import icon as cyber_icon, pixmap as cyber_pixmap
 from .update_checker import SemVersion, UpdateInfo, check_latest_release, parse_github_repository
@@ -2684,6 +2687,8 @@ class MainWindow(QMainWindow):
         self._entrance_done = False
         self._tutorial_overlay = None
         self._tutorial_checked = False
+        self._architecture_checked = False
+        self._host_architecture = None
         self._log_paused_lines: list[str] = []
         self._all_log_lines: list[str] = []
         self._pending_file_log_lines: list[str] = []
@@ -2715,6 +2720,14 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._pending_file_log_lines.append(f"sing-box recovery pending: {exc}")
         self._build(); self._setup_tray(); self._wire(); self._configure_technical_widgets(); self.refresh_profiles(); self.refresh_processes(); self._apply_language(); self._append_log("کیوب‌وی‌پی‌ان آماده است")
+        # First line of every bug report: the machine this build is running on.
+        host = detect_host()
+        self._host_architecture = host
+        self._append_log(
+            f"Host: {platform.system() or 'unknown'} {host.label}"
+            f" · build target Windows {SUPPORTED_ARCHITECTURE}"
+            + ("" if host.supported else "  =>  UNSUPPORTED")
+        )
         self.activity_bar.set_activity("", "idle", False)
         self._target_latency_timer = QTimer(self); self._target_latency_timer.setInterval(10000); self._target_latency_timer.timeout.connect(self._queue_target_latency_probe); self._target_latency_timer.start()
         QTimer.singleShot(300, self._queue_target_latency_probe)
@@ -7195,6 +7208,34 @@ class MainWindow(QMainWindow):
             return
         self.start_tutorial()
 
+    # ------------------------------------------------------- architecture --
+    def _warn_unsupported_architecture(self):
+        """Say why this build cannot work here, before the user tries to use it.
+
+        On an ARM64 PC the window opens normally and everything looks fine
+        until Connect fails with a driver error. Saying so up front costs one
+        dialog and saves a confused bug report.
+        """
+        host = detect_host()
+        self._host_architecture = host
+        if host.supported:
+            return
+        persian, english = unsupported_message(host)
+        self._set_activity(persian, english, "error", False)
+        if QApplication.platformName() == "offscreen":
+            return
+        box = QMessageBox(self)
+        box.setObjectName("cyberMessageBox")
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle(self.tr("معماری پشتیبانی‌نشده", "Unsupported architecture"))
+        box.setText(self.tr(
+            f"این نسخه روی این دستگاه ({ltr_isolate(host.label)}) کار نمی‌کند.",
+            f"This build cannot run on this machine ({host.label}).",
+        ))
+        box.setInformativeText(self.tr(persian, english))
+        box.setStandardButtons(QMessageBox.Ok)
+        box.exec()
+
     def showEvent(self, event):
         super().showEvent(event)
         self._layout_home_dashboard()
@@ -7202,6 +7243,9 @@ class MainWindow(QMainWindow):
         if self._pending_update_notification is not None:
             info = self._pending_update_notification; self._pending_update_notification = None
             QTimer.singleShot(0, lambda value=info: self._show_update_notification(value))
+        if not self._architecture_checked:
+            self._architecture_checked = True
+            QTimer.singleShot(400, self._warn_unsupported_architecture)
         if not self._tutorial_checked:
             self._tutorial_checked = True
             # After the entrance animation, so the tour does not fade in with
