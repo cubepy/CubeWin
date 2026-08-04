@@ -1,5 +1,7 @@
 # What a macOS port would actually take
 
+> فارسی: [`macos-fa.md`](macos-fa.md)
+
 This is a scoping document, not a plan of record. Nothing here is built.
 
 The short version: **most of the app ports for free, and the part that does not
