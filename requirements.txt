@@ -2,7 +2,9 @@ PySide6>=6.7
 requests>=2.31
 PySocks>=1.7.1
 psutil>=5.9
-pydivert==3.1.3
+# WinDivert bindings: Windows-only, and not installable elsewhere. Without the
+# marker the whole install fails on macOS before anything else is fetched.
+pydivert==3.1.3; sys_platform == "win32"
 scapy>=2.5
 PyInstaller>=6.0
 pytest>=8.0

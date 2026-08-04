@@ -24,7 +24,14 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-from pydivert import Flag, Packet, WinDivert
+# Windows-only, like winreg in engine.py. Guarded so the package imports on
+# macOS and Linux: Packet appears only in type annotations, and the two runtime
+# names are reached solely from start(), which refuses on an unsupported host
+# before it can touch them.
+try:
+    from pydivert import Flag, Packet, WinDivert
+except ImportError:  # pragma: no cover - exercised only off Windows
+    Flag = Packet = WinDivert = None
 
 from .packet_templates import ClientHelloMaker
 from ..platform_support import detect as detect_host, unsupported_message
