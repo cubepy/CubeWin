@@ -640,6 +640,7 @@ def test_verified_connection_starts_tun_and_requires_youtube_traffic():
         bridge=SimpleNamespace(
             activity=SimpleNamespace(emit=lambda *args: calls.append(("activity", args))),
         ),
+        _windows_features=True,
         _tun_mode_enabled=lambda: True,
         _proxy_mode_enabled=lambda: True,
         _apply_proxy_mode_after_probe=lambda _cancel: (_ for _ in ()).throw(
@@ -675,6 +676,7 @@ def test_turning_tun_off_live_restores_saved_windows_proxy_preference():
 
     dummy = SimpleNamespace(
         engine=EngineStub(),
+        _windows_features=True,
         _tun_mode_enabled=lambda: False,
         _proxy_mode_enabled=lambda: True,
     )
@@ -706,6 +708,7 @@ def test_live_tun_failure_restores_windows_proxy_and_stops_tun():
 
     dummy = SimpleNamespace(
         engine=EngineStub(),
+        _windows_features=True,
         _tun_mode_enabled=lambda: True,
         _proxy_mode_enabled=lambda: True,
     )
@@ -751,6 +754,7 @@ def test_live_tun_probe_does_not_hold_mode_mutation_lock():
     dummy = SimpleNamespace(
         engine=EngineStub(),
         _proxy_mode_apply_lock=lock,
+        _windows_features=True,
         _tun_mode_enabled=lambda: True,
         _proxy_mode_enabled=lambda: True,
     )
@@ -792,6 +796,7 @@ def test_stale_live_tun_worker_never_mutates_a_new_engine_run():
 
     dummy = SimpleNamespace(
         engine=EngineStub(),
+        _windows_features=True,
         _tun_mode_enabled=lambda: True,
         _proxy_mode_enabled=lambda: True,
     )
@@ -822,6 +827,7 @@ def test_failed_live_tun_stop_keeps_tun_and_suspends_windows_proxy():
 
     dummy = SimpleNamespace(
         engine=EngineStub(),
+        _windows_features=True,
         _tun_mode_enabled=lambda: False,
         _proxy_mode_enabled=lambda: True,
     )
@@ -860,6 +866,8 @@ def test_failed_tun_stop_ui_reflects_still_running_runtime(monkeypatch):
     proxy_option = OptionStub()
     errors = []
     dummy = SimpleNamespace(
+        # Platform gate: this stub stands in for a Windows host.
+        _windows_features=True,
         engine=SimpleNamespace(tun_running=True),
         storage=StorageStub(settings=settings),
         tun_mode=tun,
