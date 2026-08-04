@@ -1100,11 +1100,15 @@ def select_sni_core(log: Callable[[str], None],
     """
     host = detect_host()
     if host.supported:
-        log(f"SNI core: Patterniha wrong-sequence (WinDivert, {host.label})")
-        return PatternSniCore(log, traffic)
-    log(f"SNI core: TLS fragmentation — WinDivert is unavailable on "
-        f"{platform.system() or 'this system'} {host.label}")
-    return FragmentProxy(log, traffic)
+        core = PatternSniCore(log, traffic)
+        core.selection_label = (
+            f"Patterniha wrong-sequence (WinDivert, {host.label})")
+    else:
+        core = FragmentProxy(log, traffic)
+        core.selection_label = (
+            f"TLS fragmentation — WinDivert unavailable on "
+            f"{platform.system() or 'this system'} {host.label}")
+    return core
 
 
 class Engine:

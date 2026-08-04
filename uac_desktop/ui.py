@@ -2689,6 +2689,11 @@ class MainWindow(QMainWindow):
         self._tutorial_checked = False
         self._architecture_checked = False
         self._host_architecture = None
+        # Windows Proxy, TUN and Mobile Gateway all reach for Windows APIs
+        # (registry, sing-box's Windows-only TUN, ICS/iphlpapi). Where those
+        # are absent the controls are dead, so they are locked rather than
+        # left to fail on click.
+        self._windows_features = detect_host().supported
         self._log_paused_lines: list[str] = []
         self._all_log_lines: list[str] = []
         self._pending_file_log_lines: list[str] = []
@@ -2726,7 +2731,12 @@ class MainWindow(QMainWindow):
         self._append_log(
             f"Host: {platform.system() or 'unknown'} {host.label}"
             f" · build target Windows {SUPPORTED_ARCHITECTURE}"
-            + ("" if host.supported else "  =>  UNSUPPORTED")
+        )
+        # Logged here rather than where the core is chosen: selection happens
+        # during Engine construction, before _wire() connects this handler, so
+        # a line emitted there reaches nobody.
+        self._append_log(
+            f"SNI core: {getattr(self.engine.fragment, 'selection_label', 'unknown')}"
         )
         self.activity_bar.set_activity("", "idle", False)
         self._target_latency_timer = QTimer(self); self._target_latency_timer.setInterval(10000); self._target_latency_timer.timeout.connect(self._queue_target_latency_probe); self._target_latency_timer.start()
@@ -2998,7 +3008,7 @@ class MainWindow(QMainWindow):
             "با یک کلیک، اینترنت موبایل را از درگاه شبکه این رایانه به تونل تأییدشده هدایت می‌کند.",
             "One click routes mobile internet through this computer and the verified tunnel.",
         ))
-        self.proxy_option.setEnabled(not self.tun_mode.isChecked())
+        self.proxy_option.setEnabled(self._windows_features and not self.tun_mode.isChecked())
         self.carrier = QComboBox(); self.carrier.setObjectName("carrierModeCombo"); self.carrier.addItems(["auto", "mci", "irancell"]); self.carrier.setCurrentText(self.storage.tuning.carrier_mode); self.carrier.setMinimumWidth(100); self.carrier.setMaximumWidth(120); self.carrier.setAccessibleName("Carrier")
         self.carrier_control = QFrame(); self.carrier_control.setObjectName("carrierControl"); self.carrier_control.setMinimumWidth(190); carrier_layout = QHBoxLayout(self.carrier_control); self.carrier_layout = carrier_layout; carrier_layout.setContentsMargins(10, 3, 10, 3); carrier_layout.setSpacing(6); self.carrier_label = self._bind_text(QLabel(), "اپراتور", "Carrier"); self.carrier_label.setObjectName("controlLabel"); carrier_layout.addWidget(self.carrier_label); carrier_layout.addStretch(); carrier_layout.addWidget(self.carrier)
         self.tune_button = self._action_button("تنظیمات پیشرفته", "Advanced Settings", "settings", "advancedButton"); self.tune_button.setProperty("chevron", True); self.tune_button.setIconSize(QSize(19, 19)); self.tune_button.clicked.connect(self.open_tuning)
@@ -3755,7 +3765,7 @@ class MainWindow(QMainWindow):
             "One click routes mobile internet through this computer and the verified tunnel.",
         ))
         self._gateway_devices_updated(self._gateway_devices)
-        self.proxy_option.setEnabled(not self._tun_mode_enabled())
+        self.proxy_option.setEnabled(self._windows_features and not self._tun_mode_enabled())
         self._sync_gateway_controls()
         self._configure_technical_widgets()
         self._layout_home_dashboard()
@@ -4175,7 +4185,7 @@ class MainWindow(QMainWindow):
                 availability_error = str(exc)
         self._save_flag("tun_mode", enabled)
         self.tun_option.setProperty("active", enabled)
-        self.proxy_option.setEnabled(not enabled)
+        self.proxy_option.setEnabled(self._windows_features and not enabled)
         _restyle(self.tun_option)
         _restyle(self.proxy_option)
         if availability_error:
@@ -4355,7 +4365,7 @@ class MainWindow(QMainWindow):
             self.tun_mode.blockSignals(False)
             self._save_flag("tun_mode", runtime_enabled)
             self.tun_option.setProperty("active", runtime_enabled)
-            self.proxy_option.setEnabled(not runtime_enabled)
+            self.proxy_option.setEnabled(self._windows_features and not runtime_enabled)
             _restyle(self.tun_option)
             _restyle(self.proxy_option)
             self._handle_error(error)
@@ -4530,7 +4540,7 @@ class MainWindow(QMainWindow):
             _restyle(option)
         gateway_mode = getattr(self, "gateway_mode", None)
         if gateway_mode is not None:
-            gateway_mode.setEnabled(not transitioning)
+            gateway_mode.setEnabled(self._windows_features and not transitioning)
         badge = getattr(self, "gateway_devices_badge", None)
         if badge is not None:
             badge.setProperty("gatewayActive", active)
@@ -4542,9 +4552,9 @@ class MainWindow(QMainWindow):
         tun_mode = getattr(self, "tun_mode", None)
         tun_option = getattr(self, "tun_option", None)
         if tun_mode is not None:
-            tun_mode.setEnabled(not locked)
+            tun_mode.setEnabled(self._windows_features and not locked)
         if tun_option is not None:
-            tun_option.setEnabled(not locked)
+            tun_option.setEnabled(self._windows_features and not locked)
 
     def _cancel_gateway_apply(self):
         event = getattr(self, "_gateway_apply_cancel", None)
@@ -6691,10 +6701,10 @@ class MainWindow(QMainWindow):
                 reset_gateway(reason="disconnect", stop=True)
         self._ui_running = bool(running)
         self.connecting = False
-        self.proxy_mode.setEnabled(True)
-        self.tun_mode.setEnabled(True)
-        self.tun_option.setEnabled(True)
-        self.proxy_option.setEnabled(not self._tun_mode_enabled())
+        self.proxy_mode.setEnabled(self._windows_features)
+        self.tun_mode.setEnabled(self._windows_features)
+        self.tun_option.setEnabled(self._windows_features)
+        self.proxy_option.setEnabled(self._windows_features and not self._tun_mode_enabled())
         sync_gateway = getattr(self, "_sync_gateway_controls", None)
         if callable(sync_gateway):
             sync_gateway()
@@ -7210,25 +7220,44 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------- architecture --
     def _warn_unsupported_architecture(self):
-        """Tell the user which evasion core this machine gets, and why.
+        """Mark the Windows-only controls as unavailable, on the controls.
 
-        This used to say the build could not run at all. That was true while
-        WinDivert was the only core; now a machine without it falls back to TLS
-        fragmentation rather than to nothing, so the honest message is which
-        core is active — not a refusal.
+        Two earlier attempts were both wrong. A modal on launch blocked the
+        tour behind it; a permanent line in the activity bar read as a stuck
+        error, because that bar reports *current activity* and this is not
+        activity — it is a fact about the machine that never changes.
+
+        A disabled switch with a tooltip says it where it matters, at the
+        moment the user reaches for the thing that cannot work.
         """
         host = detect_host()
         self._host_architecture = host
         if host.supported:
             return
-        # The fallback works; it is simply the weaker of the two, and some
-        # Windows-only features stay unavailable. Say that once, quietly.
-        self._set_activity(
-            "هسته اسپوف ویندوز روی این سیستم در دسترس نیست؛ از تکه‌تکه‌سازی"
-            " TLS استفاده می‌شود. پروکسی سیستم و درگاه موبایل کار نمی‌کنند.",
-            "The Windows spoof core is unavailable here; TLS fragmentation is"
-            " used instead. System proxy and Mobile Gateway stay unavailable.",
-            "warning", False)
+        system = platform.system() or "this system"
+        for widget in (self.proxy_option, self.proxy_mode):
+            self._bind_tip(
+                widget,
+                f"پروکسی سیستم ویندوز روی {system} در دسترس نیست — از رجیستری"
+                " ویندوز خوانده می‌شود. مرورگر را دستی روی پورت محلی تنظیم کنید.",
+                f"Windows system proxy is unavailable on {system} — it is read"
+                " from the Windows registry. Point your browser at the local"
+                " port instead.")
+        for widget in (self.tun_option, self.tun_mode):
+            self._bind_tip(
+                widget,
+                f"حالت TUN فقط روی ویندوز کار می‌کند و روی {system} در دسترس نیست.",
+                f"TUN mode is Windows-only and unavailable on {system}.")
+        for widget in (self.gateway_option, self.gateway_mode):
+            self._bind_tip(
+                widget,
+                f"درگاه موبایل به اشتراک‌گذاری اینترنت ویندوز نیاز دارد و روی"
+                f" {system} کار نمی‌کند.",
+                f"Mobile Gateway needs Windows Internet Sharing and does not"
+                f" work on {system}.")
+        for widget in (self.proxy_option, self.proxy_mode, self.tun_option,
+                       self.tun_mode, self.gateway_option, self.gateway_mode):
+            widget.setEnabled(False)
 
     def showEvent(self, event):
         super().showEvent(event)

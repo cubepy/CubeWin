@@ -35,6 +35,8 @@ class OptionStub:
 def gateway_ui_dummy(active=False, target=None):
     dummy = SimpleNamespace(
         engine=SimpleNamespace(gateway_running=active),
+        # Platform gate: these stubs stand in for a Windows host.
+        _windows_features=True,
         gateway_mode=ToggleStub(),
         gateway_option=OptionStub(),
         tun_mode=ToggleStub(),
