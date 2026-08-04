@@ -34,7 +34,9 @@ except ImportError:  # pragma: no cover - exercised only off Windows
 from . import __version__
 from .gateway import GatewayManager
 from .models import ProxyProfile, Tuning, parse_outbound
+from .fragment_proxy import FragmentProxy
 from .pattern_core import PatternSniCore
+from .platform_support import detect as detect_host
 from .paths import (BIN, DATA_DIR, SING_BOX_CONFIG, SING_BOX_OWNER_FILE,
                     XRAY_CONFIG, XRAY_OWNER_FILE)
 
@@ -1081,11 +1083,35 @@ def build_singbox_tun_config(
     }
 
 
+def select_sni_core(log: Callable[[str], None],
+                    traffic: Callable[[int, int], None] | None = None):
+    """Pick the SNI-evasion core this machine can actually run.
+
+    Both cores are local forwarders on 127.0.0.1:<config_port> with the same
+    start/stop interface, so Xray does not know or care which one is in front
+    of it.
+
+    PatternSniCore is the stronger of the two — wrong-sequence injection
+    through WinDivert — but WinDivert is a Windows kernel driver, and kernel
+    drivers are neither emulated nor portable. Where it cannot run, the choice
+    is not "no core": FragmentProxy does adaptive TLS fragmentation in pure
+    Python, which is the same technique the mobile client uses, and needs no
+    driver and no elevation.
+    """
+    host = detect_host()
+    if host.supported:
+        log(f"SNI core: Patterniha wrong-sequence (WinDivert, {host.label})")
+        return PatternSniCore(log, traffic)
+    log(f"SNI core: TLS fragmentation — WinDivert is unavailable on "
+        f"{platform.system() or 'this system'} {host.label}")
+    return FragmentProxy(log, traffic)
+
+
 class Engine:
     def __init__(self, log: Callable[[str], None], state: Callable[[bool], None],
                  traffic: Callable[[int, int], None]) -> None:
         self.log, self.state, self.traffic = log, state, traffic
-        self.fragment = PatternSniCore(log, traffic)
+        self.fragment = select_sni_core(log, traffic)
         self.system_proxy = WindowsProxy(log)
         self.gateway = GatewayManager(engine=self, log=log)
         self.process: subprocess.Popen | None = None

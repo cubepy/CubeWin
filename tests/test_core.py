@@ -284,9 +284,29 @@ def test_recovery_reports_foreign_port_owner(monkeypatch):
         assert str(HTTP_PORT) in str(exc)
 
 
-def test_engine_uses_patterniha_core():
+def test_engine_uses_patterniha_core_where_windivert_can_run(monkeypatch):
+    """The core is chosen per platform now, not fixed.
+
+    Windows keeps wrong-sequence injection; a host without WinDivert gets the
+    driver-free fragmenter instead of nothing at all.
+    """
+    import uac_desktop.engine as engine_module
+    from uac_desktop.fragment_proxy import FragmentProxy
+    from uac_desktop.platform_support import HostArchitecture
+
+    def host(supported):
+        return HostArchitecture(
+            native="x64", process="x64", emulated=False,
+            supported=supported, reason="" if supported else "not-windows",
+        )
+
+    monkeypatch.setattr(engine_module, "detect_host", lambda: host(True))
     engine = Engine(lambda _: None, lambda _: None, lambda _up, _down: None)
     assert isinstance(engine.fragment, PatternSniCore)
+
+    monkeypatch.setattr(engine_module, "detect_host", lambda: host(False))
+    engine = Engine(lambda _: None, lambda _: None, lambda _up, _down: None)
+    assert isinstance(engine.fragment, FragmentProxy)
 
 
 def test_pattern_client_hello_contains_configured_fake_sni():

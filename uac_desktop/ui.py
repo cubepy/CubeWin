@@ -47,7 +47,7 @@ from .network import (GeoLocation, ScanResult, current_ip, current_location,
                       fetch_subscription_uris, profile_ping, profile_real_delay, tcp_ping)
 from .paths import ASSETS, DATA_DIR, LOG_FILE, reveal
 from .platform_support import (SUPPORTED as SUPPORTED_ARCHITECTURE,
-                               detect as detect_host, unsupported_message)
+                               detect as detect_host)
 from .storage import Storage
 from .icons import icon as cyber_icon, pixmap as cyber_pixmap
 from .update_checker import SemVersion, UpdateInfo, check_latest_release, parse_github_repository
@@ -7210,31 +7210,25 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------- architecture --
     def _warn_unsupported_architecture(self):
-        """Say why this build cannot work here, before the user tries to use it.
+        """Tell the user which evasion core this machine gets, and why.
 
-        On an ARM64 PC the window opens normally and everything looks fine
-        until Connect fails with a driver error. Saying so up front costs one
-        dialog and saves a confused bug report.
+        This used to say the build could not run at all. That was true while
+        WinDivert was the only core; now a machine without it falls back to TLS
+        fragmentation rather than to nothing, so the honest message is which
+        core is active — not a refusal.
         """
         host = detect_host()
         self._host_architecture = host
         if host.supported:
             return
-        persian, english = unsupported_message(host)
-        self._set_activity(persian, english, "error", False)
-        if QApplication.platformName() == "offscreen":
-            return
-        box = QMessageBox(self)
-        box.setObjectName("cyberMessageBox")
-        box.setIcon(QMessageBox.Warning)
-        box.setWindowTitle(self.tr("معماری پشتیبانی‌نشده", "Unsupported architecture"))
-        box.setText(self.tr(
-            f"این نسخه روی این دستگاه ({ltr_isolate(host.label)}) کار نمی‌کند.",
-            f"This build cannot run on this machine ({host.label}).",
-        ))
-        box.setInformativeText(self.tr(persian, english))
-        box.setStandardButtons(QMessageBox.Ok)
-        box.exec()
+        # The fallback works; it is simply the weaker of the two, and some
+        # Windows-only features stay unavailable. Say that once, quietly.
+        self._set_activity(
+            "هسته اسپوف ویندوز روی این سیستم در دسترس نیست؛ از تکه‌تکه‌سازی"
+            " TLS استفاده می‌شود. پروکسی سیستم و درگاه موبایل کار نمی‌کنند.",
+            "The Windows spoof core is unavailable here; TLS fragmentation is"
+            " used instead. System proxy and Mobile Gateway stay unavailable.",
+            "warning", False)
 
     def showEvent(self, event):
         super().showEvent(event)
