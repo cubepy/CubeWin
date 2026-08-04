@@ -173,6 +173,28 @@ class ForwarderStub:
         self.device_calls.append(dict(devices))
 
 
+def settle_discovery(manager, timeout=5.0):
+    """Wait out the device-discovery pass that ``start()`` kicks off.
+
+    ``start()`` spawns a background thread that discovers LAN devices and
+    writes them to both ``manager.devices`` and the state file. A test that
+    reads one and then the other while that thread is running is comparing two
+    snapshots taken at different instants, and both can be correct — which is
+    exactly how this file produced a failure roughly one run in five with no
+    code change.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        with manager._lock:
+            worker = manager._discovery_worker
+        if worker is None or not worker.is_alive():
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError("device discovery did not settle")
+        worker.join(timeout=remaining)
+
+
 def make_manager(tmp_path, engine=None, windows=None, arp=None, **kwargs):
     forwarder = kwargs.pop("forwarder", None) or ForwarderStub()
     manager = GatewayManager(
@@ -537,19 +559,25 @@ def test_passive_device_event_updates_runtime_and_redirects_target(tmp_path):
     manager = make_manager(tmp_path, arp=arp, forwarder=forwarder)
     manager.devices_changed = lambda devices: changed.append(dict(devices))
     manager.start()
+    # This test is about the passive ARP path only; discovery must not still be
+    # mutating the device list underneath the assertions below.
+    settle_discovery(manager)
 
     assert callable(arp.device_seen)
     assert arp.device_seen(
         "192.168.70.136",
         "aa:bb:cc:dd:ee:36",
     ) is True
-    assert manager.devices["192.168.70.136"] == "aa:bb:cc:dd:ee:36"
-    assert forwarder.device_calls[-1] == manager.devices
+    devices = manager.devices
+    assert devices["192.168.70.136"] == "aa:bb:cc:dd:ee:36"
+    assert forwarder.device_calls[-1] == devices
     assert {
         "192.168.70.136": "aa:bb:cc:dd:ee:36",
-    } in [devices for _state, devices in arp.redirect_calls]
-    assert changed[-1] == manager.devices
-    assert json.loads(manager.state_file.read_text(encoding="utf-8"))["devices"] == manager.devices
+    } in [seen for _state, seen in arp.redirect_calls]
+    assert changed[-1] == devices
+    assert json.loads(
+        manager.state_file.read_text(encoding="utf-8")
+    )["devices"] == devices
     manager.stop()
 
 
