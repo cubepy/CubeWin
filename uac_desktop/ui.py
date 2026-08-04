@@ -2726,7 +2726,12 @@ class MainWindow(QMainWindow):
         self._append_log(
             f"Host: {platform.system() or 'unknown'} {host.label}"
             f" · build target Windows {SUPPORTED_ARCHITECTURE}"
-            + ("" if host.supported else "  =>  UNSUPPORTED")
+        )
+        # Logged here rather than where the core is chosen: selection happens
+        # during Engine construction, before _wire() connects this handler, so
+        # a line emitted there reaches nobody.
+        self._append_log(
+            f"SNI core: {getattr(self.engine.fragment, 'selection_label', 'unknown')}"
         )
         self.activity_bar.set_activity("", "idle", False)
         self._target_latency_timer = QTimer(self); self._target_latency_timer.setInterval(10000); self._target_latency_timer.timeout.connect(self._queue_target_latency_probe); self._target_latency_timer.start()
