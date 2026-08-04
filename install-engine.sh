@@ -56,6 +56,11 @@ if [ ! -x "$BIN/xray" ]; then
   chmod +x "$BIN/xray"
   rm -rf "$tmp"
 fi
+chmod +x "$BIN/xray" 2>/dev/null || true
+if [ ! -x "$BIN/xray" ]; then
+  echo "xray was downloaded but is not executable: $BIN/xray" >&2
+  exit 1
+fi
 "$BIN/xray" version | head -1
 
 # --- sing-box ---------------------------------------------------------------
@@ -73,6 +78,11 @@ if [ ! -x "$BIN/sing-box" ]; then
   cp "$tmp/$SING_ASSET/LICENSE" "$BIN/sing-box-LICENSE" 2>/dev/null || true
   chmod +x "$BIN/sing-box"
   rm -rf "$tmp"
+fi
+chmod +x "$BIN/sing-box" 2>/dev/null || true
+if [ ! -x "$BIN/sing-box" ]; then
+  echo "sing-box was downloaded but is not executable: $BIN/sing-box" >&2
+  exit 1
 fi
 "$BIN/sing-box" version | head -1
 

@@ -101,3 +101,48 @@ def test_only_essentials_qt_modules_are_imported():
         used |= set(re.findall(r"from PySide6\.(\w+)", path.read_text(encoding="utf-8")))
     assert used, "no PySide6 imports found — the check would be vacuous"
     assert used <= essentials, f"needs PySide6-Addons: {sorted(used - essentials)}"
+
+
+def test_a_non_executable_engine_binary_says_how_to_fix_it(tmp_path, monkeypatch):
+    """An interrupted install leaves the binary copied but not chmod'd.
+
+    subprocess then raises a bare "[Errno 13] Permission denied" naming
+    nothing the user can act on, which is exactly what a macOS tester hit.
+    """
+    import uac_desktop.engine as engine_module
+
+    binary = tmp_path / ("xray.exe" if os.name == "nt" else "xray")
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o644)
+    monkeypatch.setattr(engine_module, "BIN", tmp_path)
+
+    engine = engine_module.Engine.__new__(engine_module.Engine)
+    with __import__("pytest").raises(PermissionError) as caught:
+        engine._binary()
+
+    message = str(caught.value)
+    assert "not executable" in message
+    assert "chmod +x" in message, "the message has to carry the fix"
+    assert str(binary) in message
+
+
+def test_an_executable_binary_is_returned(tmp_path, monkeypatch):
+    import uac_desktop.engine as engine_module
+
+    binary = tmp_path / ("xray.exe" if os.name == "nt" else "xray")
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    monkeypatch.setattr(engine_module, "BIN", tmp_path)
+
+    engine = engine_module.Engine.__new__(engine_module.Engine)
+    assert engine._binary() == binary
+
+
+def test_a_missing_binary_still_points_at_both_installers(tmp_path, monkeypatch):
+    import uac_desktop.engine as engine_module
+
+    monkeypatch.setattr(engine_module, "BIN", tmp_path)
+    engine = engine_module.Engine.__new__(engine_module.Engine)
+    with __import__("pytest").raises(FileNotFoundError) as caught:
+        engine._binary()
+    assert "install-engine.sh" in str(caught.value)
