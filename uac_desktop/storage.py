@@ -74,6 +74,11 @@ class Storage:
         if "close_to_tray" in self.settings:
             self.settings.pop("close_to_tray", None)
             preferences_changed = True
+        if "tutorial_seen" not in self.settings:
+            # A settings file that already exists belongs to someone who has
+            # been using the app; only a genuinely fresh install gets the tour.
+            self.settings["tutorial_seen"] = SETTINGS_FILE.exists()
+            preferences_changed = True
         if preferences_changed:
             self.save_settings()
         self.profiles = self._load_profiles()

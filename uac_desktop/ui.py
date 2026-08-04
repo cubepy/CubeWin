@@ -488,6 +488,10 @@ class HelpDot(QToolButton):
         self.setFixedSize(24, 24)
         self.setAutoRaise(True)
         self.setCursor(Qt.WhatsThisCursor)
+        self.set_help(help_text, rtl)
+
+    def set_help(self, help_text: str, rtl: bool = False):
+        """Re-point the guide, so a dot survives a language switch."""
         direction = "rtl" if rtl else "ltr"
         self.setToolTip(f"<div dir='{direction}' style='white-space:normal'>{html.escape(help_text)}</div>")
         self.setAccessibleName("راهنمای تنظیم" if rtl else "Setting help")
@@ -1087,6 +1091,299 @@ class ActivityBar(QFrame):
         self.rail.set_busy(busy)
         self.setProperty("state", state)
         _restyle(self)
+
+
+class TutorialOverlay(QWidget):
+    """First-run walkthrough: dims the window, cuts a hole around the widget
+    being explained, and parks a card beside it.
+
+    The overlay is a child of the central widget rather than a separate window,
+    so it always tracks the main window's geometry and cannot be left behind on
+    another monitor. It swallows mouse events over the dimmed area — clicking
+    the app mid-tour would move the very widget the card points at — but the
+    tour is never a trap: Escape, the close button and "Skip" all end it.
+    """
+
+    finished = Signal(bool)  # True when the user reached the end, False on skip
+
+    PAD = 8          # breathing room between the highlight and its target
+    CARD_WIDTH = 348
+    GAP = 16         # distance from the highlight to the card
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("tutorialOverlay")
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setAttribute(Qt.WA_StyledBackground, False)
+        self._steps: list[dict] = []
+        self._index = 0
+        self._target_rect = QRectF()
+        self._reveal = 0.0
+        self._reveal_animation = QPropertyAnimation(self, b"revealProgress", self)
+        self._reveal_animation.setDuration(260)
+        self._reveal_animation.setEasingCurve(QEasingCurve.OutCubic)
+        self._track_timer = None
+        self._track_elapsed = 0
+
+        self.card = QFrame(self)
+        self.card.setObjectName("tutorialCard")
+        self.card.setFixedWidth(self.CARD_WIDTH)
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setContentsMargins(18, 16, 18, 15)
+        card_layout.setSpacing(9)
+
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        self.step_label = QLabel()
+        self.step_label.setObjectName("tutorialStep")
+        self.close_button = QToolButton()
+        self.close_button.setObjectName("tutorialClose")
+        self.close_button.setFixedSize(24, 24)
+        self.close_button.setCursor(Qt.PointingHandCursor)
+        self.close_button.setIcon(cyber_icon("x-circle", ICON_MUTED, 15))
+        self.close_button.setIconSize(QSize(15, 15))
+        self.close_button.clicked.connect(self.skip)
+        top.addWidget(self.step_label)
+        top.addStretch()
+        top.addWidget(self.close_button)
+        card_layout.addLayout(top)
+
+        self.title_label = QLabel()
+        self.title_label.setObjectName("tutorialTitle")
+        self.title_label.setWordWrap(True)
+        self.body_label = QLabel()
+        self.body_label.setObjectName("tutorialBody")
+        self.body_label.setWordWrap(True)
+        card_layout.addWidget(self.title_label)
+        card_layout.addWidget(self.body_label)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+        self.skip_button = QPushButton()
+        self.skip_button.setObjectName("tutorialSkip")
+        self.skip_button.setCursor(Qt.PointingHandCursor)
+        self.skip_button.clicked.connect(self.skip)
+        self.back_button = QPushButton()
+        self.back_button.setObjectName("tutorialSecondary")
+        self.back_button.setCursor(Qt.PointingHandCursor)
+        self.back_button.clicked.connect(self.previous)
+        self.next_button = QPushButton()
+        self.next_button.setObjectName("tutorialPrimary")
+        self.next_button.setCursor(Qt.PointingHandCursor)
+        self.next_button.setDefault(True)
+        self.next_button.clicked.connect(self.next)
+        buttons.addWidget(self.skip_button)
+        buttons.addStretch()
+        buttons.addWidget(self.back_button)
+        buttons.addWidget(self.next_button)
+        card_layout.addLayout(buttons)
+        self.hide()
+
+    # -- animation -------------------------------------------------------
+    def _get_reveal(self):
+        return self._reveal
+
+    def _set_reveal(self, value):
+        self._reveal = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    revealProgress = Property(float, _get_reveal, _set_reveal)
+
+    # -- lifecycle -------------------------------------------------------
+    def start(self, steps, language="fa"):
+        self._steps = [step for step in steps if callable(step.get("target"))]
+        if not self._steps:
+            self.finished.emit(False)
+            return
+        self.set_language(language)
+        self._index = 0
+        self.resize(self.parentWidget().size())
+        self.show()
+        self.raise_()
+        self.setFocus(Qt.OtherFocusReason)
+        self._apply_step()
+
+    def set_language(self, language):
+        self.language = "en" if language == "en" else "fa"
+        english = self.language == "en"
+        self.setLayoutDirection(Qt.LeftToRight if english else Qt.RightToLeft)
+        self.skip_button.setText("Skip tour" if english else "رد کردن آموزش")
+        self.back_button.setText("Back" if english else "قبلی")
+        self.close_button.setToolTip("Skip tour" if english else "رد کردن آموزش")
+        if self._steps:
+            self._sync_card()
+
+    def skip(self):
+        self._close()
+        self.finished.emit(False)
+
+    def next(self):
+        if self._index >= len(self._steps) - 1:
+            self._close()
+            self.finished.emit(True)
+            return
+        self._index += 1
+        self._apply_step()
+
+    def previous(self):
+        if self._index <= 0:
+            return
+        self._index -= 1
+        self._apply_step()
+
+    def _close(self):
+        self._reveal_animation.stop()
+        if self._track_timer is not None:
+            self._track_timer.stop()
+        self.hide()
+
+    # -- step rendering --------------------------------------------------
+    def _apply_step(self):
+        step = self._steps[self._index]
+        show_page = step.get("show_page")
+        switched = callable(show_page)
+        if switched:
+            show_page()
+        self._sync_card()
+        self._sync_geometry()
+        if switched:
+            # Pages slide into place over ~430ms. Without this the ring would
+            # be drawn around where the widget is going to be, not where it is,
+            # and would sit visibly off-target for half a second.
+            self._track_transition()
+        if _animations_enabled():
+            self._reveal_animation.stop()
+            self._reveal_animation.setStartValue(0.0)
+            self._reveal_animation.setEndValue(1.0)
+            self._reveal_animation.start()
+        else:
+            self._set_reveal(1.0)
+
+    def _track_transition(self):
+        if not _animations_enabled():
+            return
+        self._track_elapsed = 0
+        if self._track_timer is None:
+            self._track_timer = QTimer(self)
+            self._track_timer.setInterval(16)
+            self._track_timer.timeout.connect(self._on_track_tick)
+        self._track_timer.start()
+
+    def _on_track_tick(self):
+        self._track_elapsed += 16
+        self._sync_geometry()
+        if self._track_elapsed >= 480:
+            self._track_timer.stop()
+
+    def _sync_card(self):
+        step = self._steps[self._index]
+        english = getattr(self, "language", "fa") == "en"
+        total = len(self._steps)
+        position = self._index + 1
+        self.step_label.setText(
+            f"STEP {position} / {total}" if english
+            else f"گام {position} از {total}"
+        )
+        self.title_label.setText(step["title_en"] if english else step["title_fa"])
+        self.body_label.setText(step["body_en"] if english else step["body_fa"])
+        self.back_button.setVisible(self._index > 0)
+        last = self._index >= total - 1
+        self.next_button.setText(
+            ("Finish" if last else "Next") if english
+            else ("پایان" if last else "بعدی")
+        )
+        self.card.adjustSize()
+
+    def _sync_geometry(self):
+        if not self._steps or not self.isVisible():
+            return
+        step = self._steps[self._index]
+        widget = step["target"]()
+        host = self.parentWidget()
+        if widget is None or not widget.isVisible() or host is None:
+            # A target that is not on screen (a hidden tab, a collapsed row)
+            # would anchor the card to an empty rect; centre the card instead.
+            self._target_rect = QRectF()
+        else:
+            # The overlay is a sibling of the widgets it highlights, not their
+            # ancestor, so coordinates go through the shared parent. Mapping
+            # straight to the overlay is rejected by Qt.
+            top_left = widget.mapTo(host, widget.rect().topLeft()) - self.pos()
+            self._target_rect = QRectF(
+                top_left.x() - self.PAD, top_left.y() - self.PAD,
+                widget.width() + self.PAD * 2, widget.height() + self.PAD * 2,
+            ).intersected(QRectF(self.rect()))
+        self._place_card()
+        self.update()
+
+    def _place_card(self):
+        self.card.adjustSize()
+        card_size = self.card.size()
+        if self._target_rect.isNull() or self._target_rect.isEmpty():
+            self.card.move(
+                int((self.width() - card_size.width()) / 2),
+                int((self.height() - card_size.height()) / 2),
+            )
+            return
+        # Prefer below the highlight, then above, then beside it — whichever
+        # first fits without running off the window.
+        below = self._target_rect.bottom() + self.GAP
+        above = self._target_rect.top() - self.GAP - card_size.height()
+        if below + card_size.height() <= self.height() - 12:
+            y = below
+        elif above >= 12:
+            y = above
+        else:
+            y = max(12, min(self.height() - card_size.height() - 12,
+                            self._target_rect.center().y() - card_size.height() / 2))
+        x = self._target_rect.center().x() - card_size.width() / 2
+        x = max(12, min(self.width() - card_size.width() - 12, x))
+        self.card.move(int(x), int(y))
+
+    # -- events ----------------------------------------------------------
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_geometry()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        scrim = QPainterPath()
+        scrim.addRect(QRectF(self.rect()))
+        if not self._target_rect.isEmpty():
+            hole = QPainterPath()
+            grown = QRectF(self._target_rect)
+            if self._reveal < 1.0:
+                # Expand the cut-out into place instead of popping it open.
+                inset = (1.0 - self._reveal) * 14
+                grown.adjust(inset, inset, -inset, -inset)
+            hole.addRoundedRect(grown, 12, 12)
+            scrim = scrim.subtracted(hole)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(tint("canvas", 214))
+        painter.drawPath(scrim)
+        if not self._target_rect.isEmpty():
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(tint("accent", int(210 * self._reveal)), 1.6))
+            painter.drawRoundedRect(self._target_rect, 12, 12)
+
+    def mousePressEvent(self, event):
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        event.accept()
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        if key == Qt.Key_Escape:
+            self.skip()
+        elif key in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+            self.next()
+        elif key == Qt.Key_Backspace:
+            self.previous()
+        else:
+            super().keyPressEvent(event)
+        event.accept()
 
 
 class MiniSparkline(QWidget):
@@ -2385,6 +2682,8 @@ class MainWindow(QMainWindow):
         self._page_animation = None
         self._animated_page = None
         self._entrance_done = False
+        self._tutorial_overlay = None
+        self._tutorial_checked = False
         self._log_paused_lines: list[str] = []
         self._all_log_lines: list[str] = []
         self._pending_file_log_lines: list[str] = []
@@ -2428,6 +2727,18 @@ class MainWindow(QMainWindow):
         widget.setText(english if self.language == "en" else persian)
         return widget
 
+    def _bind_tip(self, widget, persian, english):
+        """Bilingual hover help that survives a language switch.
+
+        Most controls are better served by a tooltip than by a visible "?":
+        the explanation is there when wanted and costs nothing on screen when
+        it is not.
+        """
+        widget.setProperty("tipFa", persian)
+        widget.setProperty("tipEn", english)
+        widget.setToolTip(english if self.language == "en" else persian)
+        return widget
+
     def _action_button(self, persian, english, icon_name, object_name="secondaryAction"):
         button = GlowButton()
         button.setObjectName(object_name)
@@ -2436,6 +2747,63 @@ class MainWindow(QMainWindow):
         button.setCursor(Qt.PointingHandCursor)
         self._bind_text(button, persian, english)
         return button
+
+    # One "?" per page, in the header, explaining what the page is for. A mark
+    # beside every individual button would put six of them in a single toolbar
+    # — the controls that need per-control help carry hover tooltips instead.
+    PAGE_HELP = {
+        "Connection Center": (
+            "همه‌چیز برای اتصال اینجاست: انتخاب کشور، دکمه اتصال، آمار زنده و"
+            " کلیدهای حالت. «پروکسی ویندوز» ترافیک برنامه‌هایی را می‌برد که از"
+            " پروکسی سیستم پیروی می‌کنند؛ «حالت TUN» تمام ترافیک ویندوز را."
+            " برای دیدن توضیح هر کلید، نشانگر را رویش نگه دارید.",
+            "Everything needed to connect: exit country, the Connect button,"
+            " live counters and the mode switches. \"Windows Proxy\" carries"
+            " apps that follow the system proxy; \"TUN Mode\" carries all of"
+            " Windows. Hover any switch for its own explanation.",
+        ),
+        "Configs": (
+            "کانفیگ‌ها را اینجا اضافه، تست و فعال می‌کنید. «User Config»"
+            " کانفیگ‌های حساب و لینک‌های واردشده است و «دستی» مواردی که خودتان"
+            " ساخته‌اید. عدد کنار هر ردیف پینگ آن مسیر است: سبز سریع، کهربایی"
+            " متوسط، قرمز کند.",
+            "Add, test and activate configs here. \"User Config\" holds account"
+            " and imported entries; \"Manual\" holds ones you built yourself."
+            " The number on each row is that route's latency: green is fast,"
+            " amber medium, red slow.",
+        ),
+        "Live Logs": (
+            "رویدادهای واقعی هسته اتصال. وقتی اتصال ناموفق است، دلیل دقیقش"
+            " اینجا نوشته می‌شود. با فیلتر می‌توانید فقط سطرهای مرتبط را ببینید"
+            " و با «کپی» کل لاگ را برای گزارش مشکل بردارید.",
+            "The connection core's real events. When a connection fails, the"
+            " exact reason lands here. Use the filter to narrow the lines, and"
+            " Copy to grab the whole log for a bug report.",
+        ),
+        "App Bypass": (
+            "هر برنامه‌ای که اینجا روشن کنید مستقیم به اینترنت وصل می‌شود و از"
+            " تونل عبور نمی‌کند. برای بانک‌داری داخلی یا سرویس‌هایی که ترافیک"
+            " خارجی را رد می‌کنند مفید است.",
+            "Anything switched on here goes straight to the internet instead of"
+            " through the tunnel. Useful for domestic banking or services that"
+            " reject foreign traffic.",
+        ),
+        "Network Tools": (
+            "ابزارهای تشخیص برای وقتی مطمئن نیستید تونل واقعاً کار می‌کند."
+            " «تست IP مستقیم» و «تست IP تونل» را پشت‌سرهم اجرا کنید: اگر"
+            " نتیجه‌شان فرق کرد، ترافیک واقعاً از تونل می‌گذرد.",
+            "Diagnostics for when you are not sure the tunnel is really"
+            " carrying traffic. Run \"Direct IP\" and \"Tunnel IP\" back to"
+            " back: if they differ, traffic is genuinely going through.",
+        ),
+        "Support & Updates": (
+            "بررسی نسخه، کانال‌های رسمی و تکرار آموزش برنامه. اگر به مشکلی"
+            " خوردید، اول لاگ زنده را ببینید و بعد از همین‌جا گزارش بدهید.",
+            "Version checks, the official channels and the app tour. If"
+            " something breaks, read Live Logs first, then report it from"
+            " here.",
+        ),
+    }
 
     def _page_header(self, persian_title, english_title, persian_subtitle, english_subtitle, trailing=None):
         header_meta = {
@@ -2456,10 +2824,20 @@ class MainWindow(QMainWindow):
         layout.addWidget(icon, 0, Qt.AlignVCenter)
         copy = QVBoxLayout(); copy.setSpacing(3)
         kicker = self._bind_text(QLabel(), persian_kicker, english_kicker); kicker.setObjectName("pageEyebrow")
+        title_row = QHBoxLayout(); title_row.setSpacing(8)
         title = self._bind_text(QLabel(), persian_title, english_title); title.setObjectName("pageTitle")
+        title_row.addWidget(title)
+        help_text = self.PAGE_HELP.get(english_title)
+        if help_text is not None:
+            dot = HelpDot(help_text[1] if self.language == "en" else help_text[0],
+                          self.language != "en")
+            dot.setProperty("helpFa", help_text[0])
+            dot.setProperty("helpEn", help_text[1])
+            title_row.addWidget(dot, 0, Qt.AlignVCenter)
+        title_row.addStretch()
         subtitle = self._bind_text(QLabel(), persian_subtitle, english_subtitle); subtitle.setObjectName("pageSubtitle"); subtitle.setWordWrap(True)
         subtitle.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        copy.addWidget(kicker); copy.addWidget(title); copy.addWidget(subtitle)
+        copy.addWidget(kicker); copy.addLayout(title_row); copy.addWidget(subtitle)
         layout.addLayout(copy, 1)
         if trailing is not None:
             layout.addWidget(trailing, 0, Qt.AlignVCenter)
@@ -2551,6 +2929,7 @@ class MainWindow(QMainWindow):
         self.country_count = QLabel(); self.country_count.setObjectName("countryCount"); self.country_count.setAlignment(Qt.AlignCenter)
         source_row = QHBoxLayout(); source_row.setSpacing(7); source_row.addStretch(1); source_row.addWidget(self.country_count)
         self.country_combo = QComboBox(); self.country_combo.setObjectName("countryCombo"); self.country_combo.setMinimumWidth(300); self.country_combo.setMinimumHeight(48); self.country_combo.setAccessibleName("Exit country"); self.country_combo.setCursor(Qt.PointingHandCursor); self.country_combo.setIconSize(QSize(30, 20))
+        self._bind_tip(self.country_combo, "کشوری که ترافیک از آن خارج می‌شود. «همه کشورها» یعنی سالم‌ترین مسیر از کل فهرست انتخاب شود.", "The country your traffic exits from. \"All countries\" lets the app pick the healthiest route from the whole list.")
         country_actions.addLayout(source_row); country_actions.addWidget(self.country_combo); country_layout.addLayout(country_actions)
         self._refresh_country_selector()
         root.addWidget(self.country_card)
@@ -2563,6 +2942,7 @@ class MainWindow(QMainWindow):
         self.down_label = QLabel("0 B"); self.download_card = MetricCard(self.tr("دانلود", "Download"), "download", self.down_label); self.download_card.title.setProperty("i18nFa", "دانلود"); self.download_card.title.setProperty("i18nEn", "Download")
         self.ip_label = QLabel("—"); self.ip_card = MetricCard(self.tr("آی‌پی عمومی", "Public IP"), "map-pin", self.ip_label); self.ip_card.title.setProperty("i18nFa", "آی‌پی عمومی"); self.ip_card.title.setProperty("i18nEn", "Public IP")
         self.ip_button = self._action_button("بررسی IP", "Check IP", "refresh", "metricAction"); self.ip_button.clicked.connect(self.check_ip); self.ip_card.layout().addWidget(self.ip_button)
+        self._bind_tip(self.ip_button, "آی‌پی عمومی فعلی را می‌گیرد. بعد از اتصال باید با آی‌پی کشور انتخابی بخواند.", "Fetches your current public IP. After connecting it should match the country you picked.")
         self.metric_cards = [self.route_card, self.latency_card, self.upload_card, self.download_card, self.ip_card]
         root.addLayout(self.metrics_layout)
 
@@ -2609,6 +2989,7 @@ class MainWindow(QMainWindow):
         self.carrier = QComboBox(); self.carrier.setObjectName("carrierModeCombo"); self.carrier.addItems(["auto", "mci", "irancell"]); self.carrier.setCurrentText(self.storage.tuning.carrier_mode); self.carrier.setMinimumWidth(100); self.carrier.setMaximumWidth(120); self.carrier.setAccessibleName("Carrier")
         self.carrier_control = QFrame(); self.carrier_control.setObjectName("carrierControl"); self.carrier_control.setMinimumWidth(190); carrier_layout = QHBoxLayout(self.carrier_control); self.carrier_layout = carrier_layout; carrier_layout.setContentsMargins(10, 3, 10, 3); carrier_layout.setSpacing(6); self.carrier_label = self._bind_text(QLabel(), "اپراتور", "Carrier"); self.carrier_label.setObjectName("controlLabel"); carrier_layout.addWidget(self.carrier_label); carrier_layout.addStretch(); carrier_layout.addWidget(self.carrier)
         self.tune_button = self._action_button("تنظیمات پیشرفته", "Advanced Settings", "settings", "advancedButton"); self.tune_button.setProperty("chevron", True); self.tune_button.setIconSize(QSize(19, 19)); self.tune_button.clicked.connect(self.open_tuning)
+        self._bind_tip(self.tune_button, "مقادیر هسته اتصال: پروفایل سرعت، Mux، Edge و SNI جعلی. اگر مطمئن نیستید دست نزنید.", "Connection core values: speed preset, Mux, edges and fake SNI. Leave alone unless you know what you need.")
         root.addWidget(controls)
         self._layout_home_dashboard()
         return page
@@ -2741,8 +3122,11 @@ class MainWindow(QMainWindow):
         toolbar = QFrame(); toolbar.setObjectName("pageToolbar"); bar = QHBoxLayout(toolbar); bar.setContentsMargins(12, 10, 12, 10); bar.setSpacing(9)
         self.account_btn = self._action_button("ورود به حساب", "Sign In", "lock", "secondaryAction")
         self.account_btn.clicked.connect(self._account_button_clicked)
+        self._bind_tip(self.account_btn, "با حساب کیوب‌وی‌پی‌ان وارد شوید تا سرویس‌های خریداری‌شده مستقیم به User Config اضافه شوند.", "Sign in with your CubeVPN account to pull purchased services straight into User Config.")
         self.add_btn = self._action_button("افزودن کانفیگ", "Add Config", "plus", "primaryAction")
+        self._bind_tip(self.add_btn, "افزودن دستی یک کانفیگ با وارد کردن لینک VLESS، Trojan، VMess یا Shadowsocks.", "Add one config by hand from a VLESS, Trojan, VMess or Shadowsocks link.")
         self.clip_btn = self._action_button("ورود از Clipboard", "Import Clipboard", "copy", "secondaryAction")
+        self._bind_tip(self.clip_btn, "لینک‌های کپی‌شده را وارد می‌کند؛ لینک اشتراک (subscription) را هم می‌پذیرد.", "Imports whatever links you copied; subscription links work too.")
         self.clear_user_btn = self._action_button("حذف همه", "Delete All", "trash", "dangerButton")
         self.clear_user_btn.setMaximumWidth(108)
         self.clear_user_btn.setToolTip(self.tr("حذف همه کانفیگ‌های User Config", "Delete every User Config entry"))
@@ -2788,6 +3172,7 @@ class MainWindow(QMainWindow):
             "پینگ کل لیست", "Ping All", "gauge", "secondaryAction"
         )
         self.profile_ping_all_btn.setMinimumWidth(112)
+        self._bind_tip(self.profile_ping_all_btn, "همه کانفیگ‌های این فهرست را تست می‌کند و عدد پینگ هر ردیف را به‌روز می‌کند.", "Tests every config in this list and refreshes the latency on each row.")
         self.profile_ping_all_btn.setMaximumWidth(142)
         self.profile_sort_combo = QComboBox()
         self.profile_sort_combo.setObjectName("profileSortCombo")
@@ -2795,6 +3180,7 @@ class MainWindow(QMainWindow):
         self.profile_sort_combo.setMaximumHeight(52)
         self.profile_sort_combo.setMinimumWidth(145)
         self.profile_sort_combo.setMaximumWidth(190)
+        self._bind_tip(self.profile_sort_combo, "ترتیب فهرست: گروه‌بندی بر اساس کشور، یا مرتب‌سازی از سریع‌ترین پینگ به کندترین.", "List order: grouped by country, or sorted from fastest latency to slowest.")
         self.profile_sort_combo.addItem(
             self.tr("مرتب‌سازی: کشور", "Sort: Country"), "country"
         )
@@ -3036,7 +3422,22 @@ class MainWindow(QMainWindow):
         ]
         for index, (icon_name, fa_title, en_title, fa_body, en_body) in enumerate(support_cards):
             box = MotionFrame(); box.setObjectName("helpCard"); l = QVBoxLayout(box); l.setContentsMargins(18, 17, 18, 17); l.setSpacing(9); icon_label = QLabel(); icon_label.setObjectName("helpIcon"); icon_label.setPixmap(cyber_pixmap(icon_name, ICON_ACCENT, 23)); icon_label.setFixedSize(38, 38); icon_label.setAlignment(Qt.AlignCenter); title = self._bind_text(QLabel(), fa_title, en_title); title.setObjectName("helpTitle"); text = self._bind_text(QLabel(), fa_body, en_body); text.setObjectName("helpText"); text.setWordWrap(True); text.setTextInteractionFlags(Qt.TextSelectableByMouse); l.addWidget(icon_label); l.addWidget(title); l.addWidget(text); l.addStretch(); info_grid.addWidget(box, 0, index)
-        root.addLayout(info_grid); credits = QLabel(f"CubeVPN {__version__}  •  based on UAC Spoofer Desktop by Floxu1 & Patterniha"); credits.setObjectName("credits"); credits.setAlignment(Qt.AlignCenter); credits.setLayoutDirection(Qt.LeftToRight); root.addWidget(credits); root.addStretch(); return page
+        root.addLayout(info_grid)
+
+        tour = MotionFrame(); tour.setObjectName("tourCard")
+        tour_layout = QHBoxLayout(tour); tour_layout.setContentsMargins(20, 16, 20, 16); tour_layout.setSpacing(16)
+        tour_icon = QLabel(); tour_icon.setObjectName("helpIcon"); tour_icon.setFixedSize(44, 44); tour_icon.setAlignment(Qt.AlignCenter); tour_icon.setPixmap(cyber_pixmap("sparkles", ICON_ACCENT, 23)); tour_layout.addWidget(tour_icon)
+        tour_copy = QVBoxLayout(); tour_copy.setSpacing(3)
+        tour_title = self._bind_text(QLabel(), "آموزش برنامه", "App tour"); tour_title.setObjectName("updateTitle")
+        tour_text = self._bind_text(QLabel(), "مسیر افزودن کانفیگ تا اولین اتصال را گام‌به‌گام نشان می‌دهد.", "Walks through adding a config and reaching your first connection."); tour_text.setObjectName("updateStatus"); tour_text.setWordWrap(True)
+        tour_copy.addWidget(tour_title); tour_copy.addWidget(tour_text); tour_layout.addLayout(tour_copy, 1)
+        self.tutorial_button = self._action_button("تکرار آموزش", "Replay Tour", "play", "secondaryAction")
+        self.tutorial_button.setMinimumWidth(176)
+        self.tutorial_button.clicked.connect(self.start_tutorial)
+        tour_layout.addWidget(self.tutorial_button, 0, Qt.AlignVCenter)
+        root.addWidget(tour)
+
+        credits = QLabel(f"CubeVPN {__version__}  •  based on UAC Spoofer Desktop by Floxu1 & Patterniha"); credits.setObjectName("credits"); credits.setAlignment(Qt.AlignCenter); credits.setLayoutDirection(Qt.LeftToRight); root.addWidget(credits); root.addStretch(); return page
 
     def _wire(self):
         self.bridge.log.connect(self._append_log); self.bridge.state.connect(self._set_state); self.bridge.traffic.connect(self._set_traffic); self.bridge.latency.connect(self._set_latency); self.bridge.target_latency.connect(self._target_latency_finished); self.bridge.error.connect(self._handle_error); self.bridge.profiles_changed.connect(self.refresh_profiles); self.bridge.profile_pings_done.connect(self._profile_pings_finished); self.bridge.ip.connect(self._ip_checked); self.bridge.hint.connect(self.connection_hint.setText); self.bridge.activity.connect(self.activity_bar.set_activity); self.bridge.processes.connect(self._populate_processes); self.bridge.update_checked.connect(self._update_checked); self.bridge.update_failed.connect(self._update_failed); self.bridge.proxy_mode_applied.connect(self._proxy_mode_apply_finished); self.bridge.tun_mode_applied.connect(self._tun_mode_apply_finished); self.bridge.gateway_mode_applied.connect(self._gateway_mode_apply_finished); self.bridge.gateway_runtime_state.connect(self._gateway_runtime_state_changed); self.bridge.gateway_devices_changed.connect(self._gateway_devices_updated)
@@ -3294,6 +3695,18 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._sync_sidebar_language_layout)
         self._update_tray_text()
         self.status_pill.set_language(self.language); self.activity_bar.set_language(self.language)
+        english = self.language == "en"
+        for dot in self.findChildren(HelpDot):
+            fa = dot.property("helpFa"); en = dot.property("helpEn")
+            if fa is not None and en is not None:
+                dot.set_help(str(en) if english else str(fa), not english)
+        for widget in self.findChildren(QWidget):
+            fa = widget.property("tipFa"); en = widget.property("tipEn")
+            if fa is not None and en is not None:
+                widget.setToolTip(str(en) if english else str(fa))
+        overlay = getattr(self, "_tutorial_overlay", None)
+        if overlay is not None:
+            overlay.set_language(self.language)
         if self._latest_update:
             self._render_update_info(self._latest_update)
         elif not self._update_in_progress:
@@ -6674,6 +7087,113 @@ class MainWindow(QMainWindow):
         self._position_toast()
         self._position_update_notification()
         self._position_gateway_devices_popup()
+        overlay = getattr(self, "_tutorial_overlay", None)
+        if overlay is not None and overlay.isVisible():
+            overlay.resize(self.centralWidget().size())
+
+    # ---------------------------------------------------------------- tour --
+    def _tutorial_steps(self):
+        """The shortest path that gets someone to a working connection.
+
+        Targets are resolved lazily because a step may live on another page:
+        the callable runs after show_page(), when the widget has real geometry.
+        """
+        return [
+            {
+                "target": lambda: self.nav[1],
+                "show_page": lambda: self.show_page(1),
+                "title_fa": "اول یک کانفیگ اضافه کنید",
+                "title_en": "Start by adding a config",
+                "body_fa": "بدون کانفیگ، دکمه اتصال کاری نمی‌کند. از این صفحه"
+                           " می‌توانید لینک VLESS، Trojan، VMess یا Shadowsocks"
+                           " را وارد کنید.",
+                "body_en": "Connect does nothing until you have a config. This"
+                           " page takes VLESS, Trojan, VMess and Shadowsocks"
+                           " links.",
+            },
+            {
+                "target": lambda: self.add_btn,
+                "show_page": lambda: self.show_page(1),
+                "title_fa": "افزودن یا ورود از کلیپ‌بورد",
+                "title_en": "Add one, or paste from the clipboard",
+                "body_fa": "«افزودن کانفیگ» برای وارد کردن دستی است. اگر لینک را"
+                           " کپی کرده‌اید، «ورود از Clipboard» سریع‌تر است و لینک"
+                           " اشتراک (subscription) را هم می‌پذیرد.",
+                "body_en": "\"Add Config\" is the manual form. If you already"
+                           " copied a link, \"Import Clipboard\" is faster and"
+                           " also accepts subscription links.",
+            },
+            {
+                "target": lambda: self.country_card,
+                "show_page": lambda: self.show_page(0),
+                "title_fa": "کشور خروجی را انتخاب کنید",
+                "title_en": "Pick an exit country",
+                "body_fa": "با انتخاب کشور، فقط کانفیگ‌های سالم همان کشور دوباره"
+                           " تست می‌شوند و بهترین مسیر خودکار وصل می‌شود.",
+                "body_en": "Choosing a country retests only that country's"
+                           " verified configs and connects the best route.",
+            },
+            {
+                "target": lambda: self.connect_button,
+                "show_page": lambda: self.show_page(0),
+                "title_fa": "اتصال",
+                "title_en": "Connect",
+                "body_fa": "همین دکمه تونل را بالا می‌آورد. وقتی وصل شد، کره و"
+                           " نشانگر وضعیت سبز می‌شوند و همین دکمه به «قطع اتصال»"
+                           " تبدیل می‌شود.",
+                "body_en": "This brings the tunnel up. Once connected the orb"
+                           " and the status pill turn green and this button"
+                           " becomes Disconnect.",
+            },
+            {
+                "target": lambda: self.auto_option,
+                "show_page": lambda: self.show_page(0),
+                "title_fa": "حالت خودکار",
+                "title_en": "Auto Mode",
+                "body_fa": "روشن بماند تا برنامه خودش سالم‌ترین مسیر را پیدا کند."
+                           " «پروکسی ویندوز» و «حالت TUN» تعیین می‌کنند ترافیک از"
+                           " کجا عبور کند — روی هرکدام نگه دارید تا توضیحش را"
+                           " ببینید.",
+                "body_en": "Leave this on and the app finds the healthiest route"
+                           " itself. \"Windows Proxy\" and \"TUN Mode\" decide how"
+                           " traffic is carried — hover either one for details.",
+            },
+            {
+                "target": lambda: self.nav[2],
+                "show_page": lambda: self.show_page(2),
+                "title_fa": "اگر چیزی کار نکرد، اینجا را ببینید",
+                "title_en": "If something fails, look here",
+                "body_fa": "خطای واقعی مسیر همیشه در لاگ زنده نوشته می‌شود. این"
+                           " آموزش را هر وقت خواستید از صفحه «پشتیبانی» دوباره"
+                           " اجرا کنید.",
+                "body_en": "The real route error always lands in Live Logs. You"
+                           " can replay this tour any time from the Support"
+                           " page.",
+            },
+        ]
+
+    def start_tutorial(self):
+        overlay = getattr(self, "_tutorial_overlay", None)
+        if overlay is None:
+            overlay = TutorialOverlay(self.centralWidget())
+            overlay.finished.connect(self._on_tutorial_finished)
+            self._tutorial_overlay = overlay
+        overlay.start(self._tutorial_steps(), self.language)
+
+    def _on_tutorial_finished(self, completed):
+        self.storage.settings["tutorial_seen"] = True
+        self.storage.save_settings()
+        if completed:
+            self._set_activity("آموزش به پایان رسید.", "Tour finished.",
+                               "success", False)
+        self.show_page(0)
+
+    def _maybe_start_first_run_tutorial(self):
+        if self.storage.settings.get("tutorial_seen"):
+            return
+        if QApplication.platformName() == "offscreen":
+            return
+        self.start_tutorial()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -6682,6 +7202,11 @@ class MainWindow(QMainWindow):
         if self._pending_update_notification is not None:
             info = self._pending_update_notification; self._pending_update_notification = None
             QTimer.singleShot(0, lambda value=info: self._show_update_notification(value))
+        if not self._tutorial_checked:
+            self._tutorial_checked = True
+            # After the entrance animation, so the tour does not fade in with
+            # the window underneath it.
+            QTimer.singleShot(650, self._maybe_start_first_run_tutorial)
         if self._entrance_done or not MOTION_ENABLED or QApplication.platformName() == "offscreen":
             return
         self._entrance_done = True
@@ -7135,6 +7660,24 @@ QLabel#closeChoiceTitle { color: $text; font-size: 17px; font-weight: 700; }
 QLabel#closeChoiceText { color: $textdim; font-size: 12px; }
 QLabel#closeChoiceDetail { color: $muted; font-size: 11px; padding: 3px 2px; }
 QDialog#closeChoiceDialog QPushButton { min-height: 36px; padding: 6px 10px; }
+
+/* -------------------------------------------------------- guided tour --- */
+QFrame#tourCard { background: $surface; border: 1px solid $line; border-radius: 16px; }
+QFrame#tourCard:hover { border-color: $linehi; }
+/* The card floats over a dimmed window, so it carries the accent border and a
+   raised surface — it has to read as "in front of" everything else. */
+QFrame#tutorialCard { background: $surfacehi; border: 1px solid $accentline; border-radius: 14px; }
+QLabel#tutorialStep { color: $accenthi; font-size: 10px; font-weight: 700; letter-spacing: 1.4px; }
+QLabel#tutorialTitle { color: $text; font-size: 16px; font-weight: 700; }
+QLabel#tutorialBody { color: $textdim; font-size: 12px; }
+QToolButton#tutorialClose { background: transparent; border: 0; border-radius: 7px; padding: 0; }
+QToolButton#tutorialClose:hover { background: $surface; }
+QPushButton#tutorialPrimary { min-height: 32px; padding: 5px 16px; border-radius: 9px; background: $accent; border: 1px solid $accent; color: $onaccent; font-weight: 700; }
+QPushButton#tutorialPrimary:hover { background: $accenthi; border-color: $accenthi; }
+QPushButton#tutorialSecondary { min-height: 32px; padding: 5px 14px; border-radius: 9px; background: transparent; border: 1px solid $line; color: $text; font-weight: 700; }
+QPushButton#tutorialSecondary:hover { border-color: $linehi; background: $surface; }
+QPushButton#tutorialSkip { min-height: 32px; padding: 5px 6px; background: transparent; border: 0; color: $muted; font-weight: 400; }
+QPushButton#tutorialSkip:hover { color: $textdim; }
 
 /* ------------------------------------------------- notifications/toasts --- */
 QFrame#updateNotification { background: $surfacehi; border: 1px solid $accentline; border-radius: 16px; }
