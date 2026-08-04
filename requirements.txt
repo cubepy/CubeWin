@@ -1,4 +1,8 @@
-PySide6>=6.7
+# Essentials, not the PySide6 meta-package: that also pulls PySide6-Addons,
+# a 316 MB download of Qt3D/Charts/Multimedia/WebEngine this app never imports.
+# The only Qt modules used anywhere in the tree are QtCore, QtGui, QtWidgets,
+# QtSvg and QtTest, all of which are in Essentials.
+PySide6-Essentials>=6.7
 requests>=2.31
 PySocks>=1.7.1
 psutil>=5.9
