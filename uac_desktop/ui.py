@@ -4883,11 +4883,15 @@ class MainWindow(QMainWindow):
         return "user-config"
 
     def _route_source_profiles(self, verified_only=False):
+        # Auto Mode routes over the configs the user supplied — whichever tab
+        # they landed in. Restricting this to User Config alone made a config
+        # pasted into Manual invisible to Auto Mode, so a user with configs
+        # was told there were none.
         source = self._selected_route_source()
         profiles = [
             profile for profile in self.storage.profiles
             if (
-                profile.origin == USER_CONFIG_ORIGIN
+                profile.origin in DIRECT_PROFILE_ORIGINS
                 if source == "user-config"
                 else profile.origin not in DIRECT_PROFILE_ORIGINS
             )
@@ -5021,9 +5025,19 @@ class MainWindow(QMainWindow):
         self.country_combo.setCurrentIndex(max(0, index))
         self.country_combo.blockSignals(False)
         active_code = self._selected_country_code()
-        active_count = len(self._country_profiles(active_code)) if active_code else sum(
-            1 for profile in self._route_source_profiles(verified_only=True)
-        )
+        if active_code:
+            active_count = len(self._country_profiles(active_code))
+        else:
+            pool = self._route_source_profiles()
+            active_count = sum(1 for profile in pool if profile.route_is_verified)
+            if not active_count and pool:
+                # "0 verified configs" next to a list holding two of them reads
+                # as a fault. Count what is there and say it is untested.
+                self.country_count.setText(self.tr(
+                    f"{len(pool)} کانفیگ · تست‌نشده",
+                    f"{len(pool)} configs · not tested",
+                ))
+                return
         self.country_count.setText(self.tr(f"{active_count} کانفیگ سالم", f"{active_count} verified configs"))
 
     def _country_activated(self, _index):
@@ -5915,7 +5929,7 @@ class MainWindow(QMainWindow):
         fallback = str(getattr(profile, "spoof_fake_sni", "") or "").strip().lower()
         if fallback:
             if (
-                    profile.origin == USER_CONFIG_ORIGIN
+                    profile.origin in DIRECT_PROFILE_ORIGINS
                     and profile.route_is_verified):
                 candidates = [
                     fallback,
@@ -5981,11 +5995,11 @@ class MainWindow(QMainWindow):
                 profile for profile in source_profiles
                 if profile.route_is_verified
             ]
-            candidates = (
-                verified
-                if self._selected_route_source() == "user-config"
-                else verified or source_profiles
-            )
+            # Verified first, but never *only* verified: a config becomes
+            # verified by connecting through it once, so refusing to try the
+            # unverified ones left a fresh install with nothing it could ever
+            # attempt.
+            candidates = verified or source_profiles
         if cancel_event.is_set():
             raise EngineCancelled("Connection attempt cancelled")
         tuning = self.storage.tuning
@@ -6000,8 +6014,10 @@ class MainWindow(QMainWindow):
             if latency_signal is not None:
                 latency_signal.emit(latency, "edge")
         for profile in candidates:
+            # A proven route already has a real tunnel latency; the generic edge
+            # ping below is a worse number and must not overwrite it.
             if not (
-                    profile.origin == USER_CONFIG_ORIGIN
+                    profile.origin in DIRECT_PROFILE_ORIGINS
                     and profile.route_is_verified and profile.last_ping_ok):
                 profile.last_ping_ok = ok
                 profile.last_ping_ms = latency
@@ -6376,11 +6392,13 @@ class MainWindow(QMainWindow):
             self.connection_error = message; self._set_connection_visual("error"); self._handle_error(message)
             return
         if (auto_enabled and forced_profile is None and not country_code
-                and self._selected_route_source() == "user-config"
-                and not self._route_source_profiles(verified_only=True)):
+                and not self._route_source_profiles()):
+            # Only when there is genuinely nothing to try. This used to demand
+            # a *verified* route, which no config can become without being
+            # tried first.
             message = self.tr(
-                "در User Config هنوز کانفیگ سالمی برای اتصال خودکار وجود ندارد",
-                "User Config has no verified route for Auto Mode yet",
+                "هیچ کانفیگی برای اتصال خودکار وجود ندارد؛ ابتدا یک کانفیگ اضافه کنید",
+                "No config is available for Auto Mode yet — add one first",
             )
             self.connection_error = message; self._set_connection_visual("error"); self._handle_error(message)
             return
@@ -6524,6 +6542,17 @@ class MainWindow(QMainWindow):
                                     self.bridge.log.emit("MUX FALLBACK WIN; Mux disabled for this working route")
                             if self._attempt_cancelled(generation, cancel):
                                 raise EngineCancelled("Connection attempt cancelled")
+                            if (page_ok and not profile.route_is_verified
+                                    and profile.origin in DIRECT_PROFILE_ORIGINS):
+                                # Carrying a real page is the proof, and this is
+                                # what verified_route was declared for — nothing
+                                # ever set it, so a user config could not become
+                                # verified and the exit-country lookup below
+                                # never ran for one.
+                                profile.verified_route = True
+                                self.storage.save_profiles()
+                                self.bridge.log.emit(f"ROUTE VERIFIED {profile.name}")
+                                self.bridge.profiles_changed.emit()
                             if page_ok and profile.route_is_verified:
                                 self.bridge.activity.emit(self.tr(
                                     "در حال بررسی کشور واقعی آی‌پی خروجی…",
