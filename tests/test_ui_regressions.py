@@ -293,7 +293,7 @@ def test_profile_click_reconnects_only_when_tunnel_is_active():
         latency_card=SimpleNamespace(sparkline=SimpleNamespace(add_value=lambda _value: None)),
         connecting=False, engine=SimpleNamespace(running=False),
         _profile_switch_waiting=False,
-        _profile_route_label=lambda _profile: "route",
+        _profile_route_label=lambda _profile, _carrier=None, include_ping=True: "route",
         _update_config_actions=lambda: None,
         _queue_profile_switch=queued.append,
     )

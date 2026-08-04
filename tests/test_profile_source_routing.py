@@ -204,8 +204,10 @@ def refresh_dummy(storage):
         tr=lambda _fa, en=None: en or _fa,
         _refresh_country_selector=lambda: None,
         _update_config_actions=lambda: None,
-        _profile_route_label=lambda item, _carrier=None: (
-            item.target_label if item is not None else ""
+        _profile_route_label=lambda item, _carrier=None, include_ping=True: (
+            (item.target_label if include_ping
+             else f"{item.address}:{item.port} / {item.sni}")
+            if item is not None else ""
         ),
     )
     dummy._country_metadata = lambda code: MainWindow._country_metadata(dummy, code)
@@ -467,7 +469,7 @@ def test_active_auto_connection_click_keeps_exact_profile_for_restart():
         _profile_switch_waiting=False,
         active_profile=LabelStub(),
         route_card=SimpleNamespace(set_secondary=lambda _text: None),
-        _profile_route_label=lambda _profile: "route",
+        _profile_route_label=lambda _profile, _carrier=None, include_ping=True: "route",
         _update_config_actions=lambda: None,
         _queue_profile_switch=queued.append,
     )
@@ -574,8 +576,8 @@ def test_user_config_country_groups_sort_by_country_then_real_ping(monkeypatch):
     MainWindow.refresh_profiles(dummy)
 
     assert header_texts(dummy.user_config_list) == [
-        "Brazil  ·  1 configs",
-        "Switzerland  ·  1 configs",
+        "Brazil  ·  1 config",
+        "Switzerland  ·  1 config",
         "United Kingdom  ·  2 configs",
     ]
     assert item_ids(dummy.user_config_list) == [

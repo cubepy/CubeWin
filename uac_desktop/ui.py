@@ -19,8 +19,8 @@ from dataclasses import replace
 import psutil
 import requests
 from PySide6.QtCore import (
-    QObject, Qt, QTimer, Signal, QSize, QRectF, QPointF, QPoint, QPropertyAnimation,
-    QEasingCurve, Property, QParallelAnimationGroup,
+    QEvent, QObject, Qt, QTimer, Signal, QSize, QRectF, QPointF, QPoint,
+    QPropertyAnimation, QEasingCurve, Property, QParallelAnimationGroup,
 )
 from PySide6.QtGui import (
     QColor, QFont, QIcon, QPainter, QPen, QLinearGradient, QIntValidator,
@@ -56,6 +56,101 @@ USER_CONFIG_ORIGIN = "sni-maker"
 MANUAL_PROFILE_ORIGINS = frozenset({"user"})
 USER_CONFIG_ORIGINS = frozenset({USER_CONFIG_ORIGIN})
 DIRECT_PROFILE_ORIGINS = MANUAL_PROFILE_ORIGINS | USER_CONFIG_ORIGINS
+
+
+# DESIGN SYSTEM
+#
+# Every colour in the app comes from this one table so the window reads as a
+# single surface instead of a pile of unrelated cards.
+#
+# Neutrals: one violet-tinted grey ramp (hue ~258). Every panel, row, input and
+# table is built from `surface*` and `line*`; nothing invents its own blue or
+# teal. Because the ramp shares the accent's hue, violet sits on it naturally.
+#
+# Accent: violet, and only violet. It marks the primary action, the current
+# selection and focus — nothing else. A second brand colour is what made the
+# old sheet look like two designs fighting.
+#
+# Semantics: success / warning / danger are reserved for state and are always
+# built the same way — `*soft` fill, `*line` border, the pure hue for text — so
+# a latency column reads as one scale instead of a colour lottery.
+COLOR_TOKENS = {
+    # Neutral ramp (dark -> light)
+    "canvas": "#0A0912",
+    "canvassoft": "#0E0C17",
+    "surface": "#141220",
+    "surfacehi": "#1B1829",
+    "surfacein": "#100E1A",
+    "herotop": "#171327",
+    "herobottom": "#121020",
+    "line": "#272233",
+    "linehi": "#37324B",
+
+    # Text ramp
+    "text": "#EFEDF7",
+    "textdim": "#A5A0BA",
+    "muted": "#6F6A85",
+    "faint": "#4A4660",
+
+    # Brand accent
+    "accent": "#A855F7",
+    "accenthi": "#BC7DFF",
+    "accentlo": "#8B3FE0",
+    "accentsoft": "rgba(168,85,247,0.13)",
+    "accentsofthi": "rgba(168,85,247,0.20)",
+    "accentline": "rgba(168,85,247,0.32)",
+    "accentlinehi": "rgba(168,85,247,0.62)",
+    "onaccent": "#150725",
+
+    # State
+    "success": "#3DDC97",
+    "successsoft": "rgba(61,220,151,0.12)",
+    "successline": "rgba(61,220,151,0.34)",
+    "warning": "#F2B544",
+    "warningsoft": "rgba(242,181,68,0.12)",
+    "warningline": "rgba(242,181,68,0.34)",
+    "danger": "#F76A85",
+    "dangersoft": "rgba(247,106,133,0.12)",
+    "dangerline": "rgba(247,106,133,0.34)",
+
+    "checkicon": str(ASSETS / "ui" / "check.svg").replace("\\", "/"),
+    "chevronicon": str(ASSETS / "ui" / "chevron-down.svg").replace("\\", "/"),
+}
+
+
+def _token_color(name: str) -> QColor:
+    """Resolve a palette token to a QColor for the hand-painted widgets."""
+    raw = COLOR_TOKENS[name]
+    if raw.startswith("rgba"):
+        red, green, blue, alpha = [x.strip() for x in raw[5:-1].split(",")]
+        return QColor(int(red), int(green), int(blue), round(float(alpha) * 255))
+    return QColor(raw)
+
+
+# Painted widgets (orb, switches, sparklines, backdrop) read from here so the
+# canvas and the stylesheet can never drift apart.
+PALETTE = {name: _token_color(name) for name in COLOR_TOKENS
+           if not name.endswith("icon")}
+
+
+def tint(name: str, alpha: int) -> QColor:
+    """A palette colour at a given opacity, for painted glows and washes."""
+    color = QColor(PALETTE[name])
+    color.setAlpha(max(0, min(255, int(alpha))))
+    return color
+
+
+# Monochrome glyphs: icons carry meaning through their shape, so they only ever
+# use the text ramp, the accent, or a state colour — never a bespoke hex.
+ICON_ON_ACCENT = COLOR_TOKENS["onaccent"]
+ICON_ACCENT = COLOR_TOKENS["accent"]
+ICON_TEXT = COLOR_TOKENS["text"]
+ICON_DIM = COLOR_TOKENS["textdim"]
+ICON_MUTED = COLOR_TOKENS["muted"]
+ICON_FAINT = COLOR_TOKENS["faint"]
+ICON_SUCCESS = COLOR_TOKENS["success"]
+ICON_DANGER = COLOR_TOKENS["danger"]
+
 
 
 def _parse_ping_latency(output: str) -> float | None:
@@ -307,16 +402,12 @@ class MotionFrame(QFrame):
         radius = max(90.0, self.width() * .42)
         anchor_x = self.width() * (.82 if self.layoutDirection() == Qt.LeftToRight else .18)
         glow = QRadialGradient(QPointF(anchor_x, self.height() * .08), radius)
-        glow.setColorAt(0, QColor(74, 255, 235, int(27 * self._glow)))
-        glow.setColorAt(.46, QColor(44, 199, 255, int(11 * self._glow)))
-        glow.setColorAt(1, QColor(44, 199, 255, 0))
+        glow.setColorAt(0, tint("accent", 22 * self._glow))
+        glow.setColorAt(.5, tint("accent", 8 * self._glow))
+        glow.setColorAt(1, tint("accent", 0))
         painter.setPen(Qt.NoPen)
         painter.setBrush(glow)
-        painter.drawRoundedRect(QRectF(1, 1, self.width() - 2, self.height() - 2), 18, 18)
-        edge = QColor(111, 255, 242, int(52 * self._glow))
-        painter.setBrush(Qt.NoBrush)
-        painter.setPen(QPen(edge, 1.0))
-        painter.drawRoundedRect(QRectF(1.5, 1.5, self.width() - 3, self.height() - 3), 18, 18)
+        painter.drawRoundedRect(QRectF(1, 1, self.width() - 2, self.height() - 2), 16, 16)
 
 
 class GlowButton(QPushButton):
@@ -365,51 +456,26 @@ class GlowButton(QPushButton):
         sweep_x = (-.18 + self._hover * 1.36) * self.width()
         sweep = QLinearGradient(sweep_x - 45, 0, sweep_x + 45, self.height())
         sweep.setColorAt(0, QColor(255, 255, 255, 0))
-        sweep.setColorAt(.5, QColor(220, 255, 252, int(22 * self._hover)))
+        sweep.setColorAt(.5, QColor(255, 255, 255, int(16 * self._hover)))
         sweep.setColorAt(1, QColor(255, 255, 255, 0))
         painter.setPen(Qt.NoPen)
         painter.setBrush(sweep)
-        painter.drawRoundedRect(QRectF(1, 1, self.width() - 2, self.height() - 2), 11, 11)
+        painter.drawRoundedRect(QRectF(1, 1, self.width() - 2, self.height() - 2), 10, 10)
 
 
 class LuminousPageHeader(MotionFrame):
-    """Readable page title surface with a restrained animated signal trace."""
+    """Page title surface.
+
+    The header used to carry a teal signal trace sweeping along its bottom
+    edge. On a bordered card it read as a stuck progress bar, and it was the
+    only teal in the app — so the header is now just the card, and the accent
+    is spent on the icon and the title instead.
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("pageHeader")
-        self.setMinimumHeight(112)
-        self._phase = 0.0
-        self._signal_timer = QTimer(self)
-        self._signal_timer.timeout.connect(self._tick_signal)
-        if _animations_enabled():
-            self._signal_timer.start(34)
-
-    def _tick_signal(self):
-        if self.isVisible():
-            self._phase = (self._phase + .0065) % 1.0
-            self.update()
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        y = self.height() - 2.0
-        base = QLinearGradient(20, y, self.width() - 20, y)
-        base.setColorAt(0, QColor(35, 245, 224, 0))
-        base.setColorAt(.18, QColor(35, 245, 224, 78))
-        base.setColorAt(.62, QColor(44, 199, 255, 30))
-        base.setColorAt(1, QColor(124, 60, 255, 0))
-        painter.setPen(QPen(base, 1.2, Qt.SolidLine, Qt.RoundCap))
-        painter.drawLine(QPointF(20, y), QPointF(self.width() - 20, y))
-        if MOTION_ENABLED:
-            center = 20 + self._phase * max(1, self.width() - 40)
-            signal = QLinearGradient(center - 74, y, center + 74, y)
-            signal.setColorAt(0, QColor(35, 245, 224, 0))
-            signal.setColorAt(.5, QColor(191, 255, 249, 225))
-            signal.setColorAt(1, QColor(44, 199, 255, 0))
-            painter.setPen(QPen(signal, 2.2, Qt.SolidLine, Qt.RoundCap))
-            painter.drawLine(QPointF(max(20, center - 74), y), QPointF(min(self.width() - 20, center + 74), y))
+        self.setMinimumHeight(104)
 
 
 class HelpDot(QToolButton):
@@ -452,18 +518,18 @@ class CyberRoot(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
         width, height = self.width(), self.height()
 
-        cyan = QRadialGradient(QPointF(width * .72, height * .12), max(280, width * .42))
-        cyan.setColorAt(0, QColor(35, 245, 224, 23))
-        cyan.setColorAt(.45, QColor(44, 199, 255, 10))
-        cyan.setColorAt(1, QColor(5, 11, 24, 0))
-        painter.fillRect(self.rect(), cyan)
+        # Two blooms of the same accent, not a teal one fighting a purple one.
+        top = QRadialGradient(QPointF(width * .72, height * .10), max(300, width * .46))
+        top.setColorAt(0, tint("accent", 20))
+        top.setColorAt(1, tint("accent", 0))
+        painter.fillRect(self.rect(), top)
 
-        purple = QRadialGradient(QPointF(width * .94, height * .82), max(240, width * .33))
-        purple.setColorAt(0, QColor(124, 60, 255, 18))
-        purple.setColorAt(1, QColor(5, 11, 24, 0))
-        painter.fillRect(self.rect(), purple)
+        bottom = QRadialGradient(QPointF(width * .12, height * .92), max(260, width * .36))
+        bottom.setColorAt(0, tint("accent", 12))
+        bottom.setColorAt(1, tint("accent", 0))
+        painter.fillRect(self.rect(), bottom)
 
-        painter.setPen(QPen(QColor(44, 199, 255, 10), 1))
+        painter.setPen(QPen(tint("linehi", 26), 1))
         offset = int(self._phase) if MOTION_ENABLED else 0
         for x in range(-48 + offset, width + 48, 48):
             painter.drawLine(x, 0, x, height)
@@ -495,31 +561,29 @@ class HeroCard(MotionFrame):
         width, height = self.width(), self.height()
 
         glow = QRadialGradient(QPointF(width * .74, height * .47), max(130, height * .92))
-        glow.setColorAt(0, QColor(35, 245, 224, 24))
-        glow.setColorAt(.48, QColor(44, 199, 255, 9))
-        glow.setColorAt(1, QColor(5, 11, 24, 0))
+        glow.setColorAt(0, tint("accent", 26))
+        glow.setColorAt(.5, tint("accent", 9))
+        glow.setColorAt(1, tint("accent", 0))
         painter.fillRect(self.rect(), glow)
-
 
         beam_x = width * (.12 + (.5 + .5 * math.sin(self._phase * .72)) * .76)
         beam = QLinearGradient(beam_x - 92, 0, beam_x + 92, height)
-        beam.setColorAt(0, QColor(44, 199, 255, 0))
-        beam.setColorAt(.48, QColor(105, 250, 239, 10))
-        beam.setColorAt(.52, QColor(198, 255, 249, 23))
-        beam.setColorAt(1, QColor(44, 199, 255, 0))
+        beam.setColorAt(0, tint("accenthi", 0))
+        beam.setColorAt(.5, tint("accenthi", 16))
+        beam.setColorAt(1, tint("accenthi", 0))
         painter.setPen(Qt.NoPen)
         painter.setBrush(beam)
-        painter.drawRoundedRect(QRectF(1, 1, width - 2, height - 2), 26, 26)
+        painter.drawRoundedRect(QRectF(1, 1, width - 2, height - 2), 20, 20)
 
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(44, 199, 255, 24))
+        painter.setBrush(tint("accent", 26))
         start_x = int(width * .48)
         for x in range(start_x, width - 18, 20):
             for y in range(20, height - 14, 20):
                 if ((x // 20) + (y // 20)) % 3 == 0:
                     painter.drawEllipse(QPointF(x, y), 1.15, 1.15)
 
-        for index, alpha in enumerate((34, 20, 12)):
+        for index, alpha in enumerate((30, 18, 10)):
             path = QPainterPath()
             baseline = height * (.72 + index * .045)
             amplitude = max(7, height * (.045 - index * .008))
@@ -528,7 +592,7 @@ class HeroCard(MotionFrame):
                 wave = math.sin(x / 66 + self._phase + index * .7)
                 wave += .38 * math.sin(x / 23 - self._phase * .7)
                 path.lineTo(x, baseline + wave * amplitude)
-            painter.setPen(QPen(QColor(44, 199, 255, alpha), 1.1))
+            painter.setPen(QPen(tint("accent", alpha), 1.1))
             painter.drawPath(path)
 
 
@@ -566,9 +630,9 @@ class NavButton(QPushButton):
                 painter.setRenderHint(QPainter.Antialiasing)
             trailing_x = 10 if self.layoutDirection() == Qt.LayoutDirection.RightToLeft else self.width() - 18
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(35, 245, 224, 45))
+            painter.setBrush(tint("accent", 46))
             painter.drawEllipse(QPointF(trailing_x, self.height() / 2), 8, 8)
-            painter.setBrush(QColor("#A855F7"))
+            painter.setBrush(PALETTE["accent"])
             painter.drawEllipse(QPointF(trailing_x, self.height() / 2), 4, 4)
 
 
@@ -639,10 +703,15 @@ class ToggleSwitch(QCheckBox):
         painter.setRenderHint(QPainter.Antialiasing)
         enabled = self.isEnabled()
         checked = self.isChecked()
-        track = QColor("#430d76" if checked else "#28123c")
+        # On reads as the accent, off as an ordinary inset control. The old
+        # switch was purple in both states, so "off" still looked lit.
         if not enabled:
-            track = QColor("#111c2d")
-        painter.setPen(QPen(QColor("#9741e8" if checked else "#52346f"), 1))
+            track, edge, thumb = PALETTE["canvassoft"], PALETTE["line"], PALETTE["faint"]
+        elif checked:
+            track, edge, thumb = PALETTE["accent"], PALETTE["accent"], PALETTE["text"]
+        else:
+            track, edge, thumb = PALETTE["surfacein"], PALETTE["linehi"], PALETTE["muted"]
+        painter.setPen(QPen(edge, 1))
         painter.setBrush(track)
         painter.drawRoundedRect(QRectF(1, 2, 46, 22), 11, 11)
         position = self._thumb_position
@@ -652,13 +721,10 @@ class ToggleSwitch(QCheckBox):
         if self.layoutDirection() == Qt.RightToLeft:
             thumb_x = 35 - 22 * position
         painter.setPen(Qt.NoPen)
-        glow_alpha = int(10 + 38 * position) if checked or position > .01 else 0
-        painter.setBrush(QColor(35, 245, 224, glow_alpha))
-        painter.drawEllipse(QPointF(thumb_x, 13), 10 + position, 10 + position)
-        painter.setBrush(QColor("#eaffff" if checked else "#a68dbd"))
+        painter.setBrush(thumb)
         painter.drawEllipse(QPointF(thumb_x, 13), 7, 7)
         if self.hasFocus():
-            painter.setPen(QPen(QColor(44, 199, 255, 160), 1.4, Qt.DashLine))
+            painter.setPen(QPen(PALETTE["accenthi"], 1.4, Qt.DashLine))
             painter.setBrush(Qt.NoBrush)
             painter.drawRoundedRect(QRectF(.5, .5, 47, 25), 12, 12)
 
@@ -681,7 +747,7 @@ class GatewayDevicesPopup(QFrame):
         self.icon.setObjectName("gatewayPopupIcon")
         self.icon.setFixedSize(34, 34)
         self.icon.setAlignment(Qt.AlignCenter)
-        self.icon.setPixmap(cyber_pixmap("network", "#bc75ff", 18))
+        self.icon.setPixmap(cyber_pixmap("network", ICON_ACCENT, 18))
         titles = QVBoxLayout()
         titles.setContentsMargins(0, 0, 0, 0)
         titles.setSpacing(1)
@@ -762,7 +828,7 @@ class GatewayDevicesPopup(QFrame):
             empty_layout.setSpacing(5)
             empty_icon = QLabel()
             empty_icon.setAlignment(Qt.AlignCenter)
-            empty_icon.setPixmap(cyber_pixmap("wifi", "#6f91b5", 23))
+            empty_icon.setPixmap(cyber_pixmap("wifi", ICON_MUTED, 23))
             empty_text = QLabel(
                 "No device detected yet"
                 if self.language == "en"
@@ -787,7 +853,7 @@ class GatewayDevicesPopup(QFrame):
                 check.setObjectName("gatewayDeviceCheck")
                 check.setFixedSize(25, 25)
                 check.setAlignment(Qt.AlignCenter)
-                check.setPixmap(cyber_pixmap("check-circle", "#23f5a6", 20))
+                check.setPixmap(cyber_pixmap("check-circle", ICON_SUCCESS, 20))
                 details = QVBoxLayout()
                 details.setContentsMargins(0, 0, 0, 0)
                 details.setSpacing(1)
@@ -821,14 +887,14 @@ class GatewayDevicesPopup(QFrame):
 
 class PulseDot(QWidget):
     COLORS = {
-        "disconnected": QColor("#5f7fa6"),
-        "connecting": QColor("#ffd166"),
-        "connected": QColor("#23f5a6"),
-        "error": QColor("#ff5c7c"),
-        "idle": QColor("#5f7fa6"),
-        "running": QColor("#A855F7"),
-        "success": QColor("#23f5a6"),
-        "warning": QColor("#ffd166"),
+        "disconnected": PALETTE["muted"],
+        "connecting": PALETTE["warning"],
+        "connected": PALETTE["success"],
+        "error": PALETTE["danger"],
+        "idle": PALETTE["muted"],
+        "running": PALETTE["accent"],
+        "success": PALETTE["success"],
+        "warning": PALETTE["warning"],
     }
 
     def __init__(self, parent=None):
@@ -921,7 +987,7 @@ class ActivityIndicator(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        color = QColor({"error": "#ff5c7c", "warning": "#ffd166", "success": "#23f5a6"}.get(self.state, "#A855F7"))
+        color = QColor(PALETTE.get({"error": "danger", "warning": "warning", "success": "success"}.get(self.state, "accent")))
         if self.busy:
             for index in range(12):
                 angle = math.radians(index * 30)
@@ -966,17 +1032,17 @@ class ActivityRail(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.fillRect(self.rect(), QColor(44, 199, 255, 16))
+        painter.fillRect(self.rect(), tint("line", 150))
         if not self.busy:
             return
         start = max(0.0, self._phase - .18)
         end = min(1.0, self._phase + .18)
         gradient = QLinearGradient(0, 0, self.width(), 0)
-        gradient.setColorAt(0, QColor(35, 245, 224, 0))
-        gradient.setColorAt(start, QColor(35, 245, 224, 0))
-        gradient.setColorAt(self._phase, QColor(35, 245, 224, 230))
-        gradient.setColorAt(end, QColor(44, 199, 255, 0))
-        gradient.setColorAt(1, QColor(44, 199, 255, 0))
+        gradient.setColorAt(0, tint("accent", 0))
+        gradient.setColorAt(start, tint("accent", 0))
+        gradient.setColorAt(self._phase, tint("accent", 230))
+        gradient.setColorAt(end, tint("accent", 0))
+        gradient.setColorAt(1, tint("accent", 0))
         painter.fillRect(self.rect(), gradient)
 
 
@@ -1042,7 +1108,7 @@ class MiniSparkline(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         baseline = self.height() - 5
-        painter.setPen(QPen(QColor(44, 199, 255, 50), 1))
+        painter.setPen(QPen(PALETTE["line"], 1))
         painter.drawLine(0, baseline, self.width(), baseline)
         if len(self.values) < 2:
             return
@@ -1054,7 +1120,7 @@ class MiniSparkline(QWidget):
             y = baseline - 3 - ((value - low) / span) * max(7, self.height() - 11)
             if index == 0: path.moveTo(x, y)
             else: path.lineTo(x, y)
-        painter.setPen(QPen(QColor("#A855F7"), 1.4))
+        painter.setPen(QPen(PALETTE["accent"], 1.4))
         painter.drawPath(path)
 
 
@@ -1070,6 +1136,12 @@ class ElidedLabel(QLabel):
     def setText(self, text):
         self._full_text = str(text or "")
         self._sync_text()
+
+    def text(self):
+        """Report the full string, not the "…" the widget happens to be
+        painting. The language switch reads text() to remap labels, and an
+        elided value never matches its entry."""
+        return self._full_text
 
     def _sync_text(self):
         width = self.contentsRect().width()
@@ -1098,13 +1170,18 @@ class MetricCard(MotionFrame):
         header = QHBoxLayout(); header.setSpacing(9)
         self.icon_label = QLabel(); self.icon_label.setObjectName("metricIcon")
         self.icon_label.setFixedSize(34, 34)
-        self.icon_label.setPixmap(cyber_pixmap(icon_name, "#A855F7", 19))
+        self.icon_label.setPixmap(cyber_pixmap(icon_name, ICON_ACCENT, 19))
         self.title = QLabel(title); self.title.setObjectName("metricLabel")
         header.addWidget(self.icon_label); header.addWidget(self.title); header.addStretch()
         self.card_layout.addLayout(header)
+        # The value sits directly under the label and the slack goes below it.
+        # Giving the value the stretch instead centred it in whatever space each
+        # card had left, so five cards in a row showed five different baselines.
         self.value = value_widget or QLabel("—")
         self.value.setObjectName("metricValue")
-        self.card_layout.addWidget(self.value, 1)
+        self.value.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.card_layout.addWidget(self.value)
+        self.card_layout.addStretch(1)
         self.secondary = QLabel("")
         self.secondary.setObjectName("metricSecondary")
         self.secondary.setLayoutDirection(Qt.LeftToRight)
@@ -1181,7 +1258,9 @@ class ProfileListRow(QFrame):
         self.activate_button.setObjectName("profileRowActivate")
         self.activate_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.activate_button.setText(str(activate_text))
-        self.activate_button.setIcon(cyber_icon("check-circle" if active else "play", "#081a26", 15))
+        self.activate_button.setIcon(cyber_icon(
+            "check-circle" if active else "play",
+            ICON_SUCCESS if active else ICON_ACCENT, 15))
         self.activate_button.setIconSize(QSize(15, 15))
         self.activate_button.setProperty("active", bool(active))
         self.activate_button.setMinimumWidth(88)
@@ -1195,18 +1274,22 @@ class ProfileListRow(QFrame):
         self.ping_badge.setAlignment(Qt.AlignCenter)
         self.ping_badge.setFixedSize(84, 30)
         self.ping_badge.setLayoutDirection(Qt.LeftToRight)
+        # Row utilities stay quiet: with a full list on screen, nine red delete
+        # glyphs read as nine errors. They pick up colour on hover instead.
         self.edit_button = QToolButton()
         self.edit_button.setObjectName("profileRowEdit")
-        self.edit_button.setIcon(cyber_icon("edit", "#be79ff", 16))
+        self.edit_button.setIcon(cyber_icon("edit", ICON_MUTED, 16))
         self.edit_button.setIconSize(QSize(16, 16))
         self.edit_button.setFixedSize(28, 28)
         self.edit_button.setFocusPolicy(Qt.NoFocus)
         self.delete_button = QToolButton()
         self.delete_button.setObjectName("profileRowDelete")
-        self.delete_button.setIcon(cyber_icon("x-circle", "#ff8798", 16))
+        self.delete_button.setIcon(cyber_icon("x-circle", ICON_MUTED, 16))
         self.delete_button.setIconSize(QSize(16, 16))
         self.delete_button.setFixedSize(28, 28)
         self.delete_button.setFocusPolicy(Qt.NoFocus)
+        self.edit_button.installEventFilter(self)
+        self.delete_button.installEventFilter(self)
         layout.addWidget(icon_label)
         layout.addLayout(text_box, 1)
         layout.addWidget(self.ping_badge)
@@ -1222,6 +1305,17 @@ class ProfileListRow(QFrame):
         self.delete_button.clicked.connect(
             lambda: self.deleteRequested.emit(self.profile_id)
         )
+
+    def eventFilter(self, watched, event):
+        if event.type() in (QEvent.Enter, QEvent.Leave):
+            hovered = event.type() == QEvent.Enter
+            if watched is self.edit_button:
+                watched.setIcon(cyber_icon(
+                    "edit", ICON_ACCENT if hovered else ICON_MUTED, 16))
+            elif watched is self.delete_button:
+                watched.setIcon(cyber_icon(
+                    "x-circle", ICON_DANGER if hovered else ICON_MUTED, 16))
+        return super().eventFilter(watched, event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -1259,12 +1353,12 @@ class EmptyListWidget(QListWidget):
         painter = QPainter(self.viewport())
         painter.setRenderHint(QPainter.Antialiasing)
         area = self.viewport().rect()
-        pix = cyber_pixmap(self.empty_icon, "#3a7690", 38)
+        pix = cyber_pixmap(self.empty_icon, ICON_FAINT, 38)
         painter.drawPixmap(int(area.center().x() - pix.width() / 2), int(area.center().y() - 66), pix)
-        painter.setPen(QColor("#d8e9f6"))
+        painter.setPen(PALETTE["textdim"])
         font = painter.font(); font.setPointSize(12); font.setWeight(QFont.DemiBold); painter.setFont(font)
         painter.drawText(QRectF(24, area.center().y() - 14, area.width() - 48, 30), Qt.AlignCenter, self.empty_title)
-        painter.setPen(QColor("#7993b3"))
+        painter.setPen(PALETTE["muted"])
         font.setPointSize(9); font.setWeight(QFont.Normal); painter.setFont(font)
         painter.drawText(QRectF(30, area.center().y() + 16, area.width() - 60, 44), Qt.AlignHCenter | Qt.AlignTop | Qt.TextWordWrap, self.empty_subtitle)
 
@@ -1341,14 +1435,15 @@ class CyberProgressBar(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self); painter.setRenderHint(QPainter.Antialiasing)
         area = QRectF(0, 1, self.width(), self.height() - 2)
-        painter.setPen(QPen(QColor("#23405f"), 1)); painter.setBrush(QColor("#071423")); painter.drawRoundedRect(area, 8, 8)
+        painter.setPen(QPen(PALETTE["line"], 1)); painter.setBrush(PALETTE["surfacein"]); painter.drawRoundedRect(area, 8, 8)
         ratio = self._value / self._maximum if self._maximum else 0
         if ratio > 0:
             fill = QRectF(1, 2, max(3, (self.width() - 2) * ratio), self.height() - 4)
             gradient = QLinearGradient(fill.left(), 0, fill.right(), 0)
             shimmer = self._phase / 100
-            gradient.setColorAt(0, QColor("#0ea5a8")); gradient.setColorAt(max(0.05, shimmer - .12), QColor("#14b8a6"))
-            gradient.setColorAt(min(.95, shimmer), QColor("#67e8f9")); gradient.setColorAt(min(1, shimmer + .16), QColor("#22d3ee")); gradient.setColorAt(1, QColor("#0891b2"))
+            gradient.setColorAt(0, PALETTE["accentlo"])
+            gradient.setColorAt(min(.95, shimmer), PALETTE["accenthi"])
+            gradient.setColorAt(1, PALETTE["accentlo"])
             painter.setPen(Qt.NoPen); painter.setBrush(gradient); painter.drawRoundedRect(fill, 7, 7)
 
 
@@ -1388,11 +1483,13 @@ def badge(text, kind="neutral"):
 
 
 class ConnectionOrb(QWidget):
+    # Connected is the success colour, not the brand colour: the orb is the
+    # app's status readout, and it should agree with the pill next to it.
     COLORS = {
-        "disconnected": QColor("#5f7fa6"),
-        "connecting": QColor("#ffd166"),
-        "connected": QColor("#A855F7"),
-        "error": QColor("#ff5c7c"),
+        "disconnected": PALETTE["muted"],
+        "connecting": PALETTE["warning"],
+        "connected": PALETTE["success"],
+        "error": PALETTE["danger"],
     }
 
     def __init__(self):
@@ -1477,9 +1574,9 @@ class ConnectionOrb(QWidget):
         p.setPen(Qt.NoPen); p.setBrush(aura); p.drawEllipse(center, 108, 108)
 
         core_glow = QRadialGradient(center, 64)
-        core_glow.setColorAt(0, QColor(225, 255, 252, 12 + int(pulse * 13)))
+        core_glow.setColorAt(0, QColor(255, 255, 255, 10 + int(pulse * 12)))
         core_glow.setColorAt(.6, QColor(color.red(), color.green(), color.blue(), 16))
-        core_glow.setColorAt(1, QColor(5, 18, 35, 0))
+        core_glow.setColorAt(1, QColor(color.red(), color.green(), color.blue(), 0))
         p.setPen(Qt.NoPen); p.setBrush(core_glow); p.drawEllipse(center, 65, 65)
 
         for radius, alpha, width in ((103, 30, 1), (94, 55, 1.2), (80, 110, 1.7), (67, 62, 1)):
@@ -1494,7 +1591,7 @@ class ConnectionOrb(QWidget):
         p.drawArc(QRectF(center.x() - 103, center.y() - 103, 206, 206), int((126 - rotation * .34) * 16), 132 * 16)
         p.drawArc(QRectF(center.x() - 68, center.y() - 68, 136, 136), int((38 + rotation * .52) * 16), 94 * 16)
         if self.state == "connecting":
-            p.setPen(QPen(QColor(255, 209, 102, 220), 3, Qt.SolidLine, Qt.RoundCap))
+            p.setPen(QPen(tint("warning", 220), 3, Qt.SolidLine, Qt.RoundCap))
             p.drawArc(QRectF(center.x() - 70, center.y() - 70, 140, 140), int(rotation * 2.2 * 16), 44 * 16)
 
         p.setPen(Qt.NoPen)
@@ -1520,22 +1617,23 @@ class ConnectionOrb(QWidget):
         shield.lineTo(center.x() - 45, center.y() - 32)
         shield.cubicTo(center.x() - 42, center.y() - 37, center.x() - 26, center.y() - 46, center.x(), center.y() - 54)
         shield.closeSubpath()
+        canvas = PALETTE["canvas"]
         shield_fill = QLinearGradient(center.x(), center.y() - 55, center.x(), center.y() + 56)
         shield_fill.setColorAt(0, QColor(color.red(), color.green(), color.blue(), 62))
-        shield_fill.setColorAt(1, QColor(5, 18, 35, 210))
+        shield_fill.setColorAt(1, QColor(canvas.red(), canvas.green(), canvas.blue(), 215))
         p.setBrush(shield_fill)
         p.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 210), 1.5))
         p.drawPath(shield)
         inner = shield.translated(0, 2)
         p.setBrush(Qt.NoBrush); p.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 65), 1)); p.drawPath(inner)
 
-        lock_color = QColor("#dffcff" if self.state != "error" else "#ffe5eb")
+        lock_color = QColor(PALETTE["text"])
         p.setPen(QPen(lock_color, 5.5, Qt.SolidLine, Qt.RoundCap))
         p.setBrush(Qt.NoBrush)
         p.drawArc(QRectF(center.x() - 15, center.y() - 20, 30, 30), 0, 180 * 16)
         p.setPen(Qt.NoPen); p.setBrush(lock_color)
         p.drawRoundedRect(QRectF(center.x() - 20, center.y() - 6, 40, 31), 8, 8)
-        p.setBrush(QColor("#082037")); p.drawEllipse(QPointF(center.x(), center.y() + 7), 3.6, 3.6)
+        p.setBrush(PALETTE["canvas"]); p.drawEllipse(QPointF(center.x(), center.y() + 7), 3.6, 3.6)
         p.drawRoundedRect(QRectF(center.x() - 1.8, center.y() + 7, 3.6, 9), 1.8, 1.8)
 
 
@@ -1571,7 +1669,7 @@ class CloseChoiceDialog(QDialog):
         icon.setObjectName("closeChoiceIcon")
         icon.setFixedSize(42, 42)
         icon.setAlignment(Qt.AlignCenter)
-        icon.setPixmap(cyber_pixmap("shield", "#A855F7", 29))
+        icon.setPixmap(cyber_pixmap("shield", ICON_ACCENT, 29))
         copy = QVBoxLayout()
         copy.setSpacing(2)
         title = QLabel(t("بستن برنامه", "Close CubeVPN"))
@@ -1598,18 +1696,18 @@ class CloseChoiceDialog(QDialog):
         actions.setSpacing(8)
         cancel = QPushButton(t("لغو", "Cancel"))
         cancel.setObjectName("quietButton")
-        cancel.setIcon(cyber_icon("x-circle", "#b7cce0", 16))
+        cancel.setIcon(cyber_icon("x-circle", ICON_DIM, 16))
         cancel.clicked.connect(self.reject)
         quit_button = QPushButton(t("خروج کامل", "Quit"))
         quit_button.setObjectName("dangerButton")
-        quit_button.setIcon(cyber_icon("power", "#ffb7c5", 17))
+        quit_button.setIcon(cyber_icon("power", ICON_DANGER, 17))
         quit_button.clicked.connect(lambda: self._finish("quit"))
         actions.addWidget(cancel)
         actions.addWidget(quit_button)
         if tray_available:
             tray_button = QPushButton(t("رفتن به Tray", "System Tray"))
             tray_button.setObjectName("trayChoiceButton")
-            tray_button.setIcon(cyber_icon("network", "#031422", 17))
+            tray_button.setIcon(cyber_icon("network", ICON_ON_ACCENT, 17))
             tray_button.clicked.connect(lambda: self._finish("tray"))
             tray_button.setDefault(True)
             actions.addWidget(tray_button)
@@ -1629,7 +1727,7 @@ class ProfileDialog(QDialog):
         self.profile = profile
         layout = QVBoxLayout(self); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(0)
         header = QFrame(); header.setObjectName("modalHeader"); header_layout = QHBoxLayout(header); header_layout.setContentsMargins(26, 21, 26, 19); header_layout.setSpacing(14)
-        header_icon = QLabel(); header_icon.setObjectName("modalIcon"); header_icon.setFixedSize(46, 46); header_icon.setPixmap(cyber_pixmap("file-cog", "#A855F7", 25)); header_layout.addWidget(header_icon)
+        header_icon = QLabel(); header_icon.setObjectName("modalIcon"); header_icon.setFixedSize(46, 46); header_icon.setPixmap(cyber_pixmap("file-cog", ICON_ACCENT, 25)); header_layout.addWidget(header_icon)
         header_copy = QVBoxLayout(); header_copy.setSpacing(4); heading = QLabel(t("ویرایش کانفیگ", "Edit Config") if profile else t("افزودن کانفیگ", "Add Config")); heading.setObjectName("modalTitle"); subtitle = QLabel(t("مشخصات مسیر و لینک اتصال را با دقت بررسی کنید.", "Review the connection URI and route details.")); subtitle.setObjectName("modalSubtitle"); subtitle.setWordWrap(True); header_copy.addWidget(heading); header_copy.addWidget(subtitle); header_layout.addLayout(header_copy, 1); layout.addWidget(header)
 
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setFrameShape(QFrame.NoFrame); scroll.setObjectName("modalScroll")
@@ -1658,8 +1756,8 @@ class ProfileDialog(QDialog):
         body_layout.addWidget(identity); body_layout.addWidget(route); body_layout.addStretch(); scroll.setWidget(body); layout.addWidget(scroll, 1)
 
         footer = QFrame(); footer.setObjectName("modalFooter"); footer_layout = QHBoxLayout(footer); footer_layout.setContentsMargins(24, 15, 24, 18); footer_layout.addStretch()
-        cancel = QPushButton(t("لغو", "Cancel")); cancel.setObjectName("modalSecondary"); cancel.setIcon(cyber_icon("x-circle", "#b7cce0", 18)); cancel.clicked.connect(self.reject)
-        save = QPushButton(t("ذخیره کانفیگ", "Save Config")); save.setObjectName("modalPrimary"); save.setIcon(cyber_icon("check-circle", "#031422", 18)); save.setDefault(True); save.clicked.connect(self._validate_accept)
+        cancel = QPushButton(t("لغو", "Cancel")); cancel.setObjectName("modalSecondary"); cancel.setIcon(cyber_icon("x-circle", ICON_DIM, 18)); cancel.clicked.connect(self.reject)
+        save = QPushButton(t("ذخیره کانفیگ", "Save Config")); save.setObjectName("modalPrimary"); save.setIcon(cyber_icon("check-circle", ICON_ON_ACCENT, 18)); save.setDefault(True); save.clicked.connect(self._validate_accept)
         footer_layout.addWidget(cancel); footer_layout.addWidget(save); layout.addWidget(footer)
         self.uri.textChanged.connect(self._clear_validation)
 
@@ -1668,7 +1766,14 @@ class ProfileDialog(QDialog):
         title = QLabel(title_text); title.setObjectName("settingsTitle"); subtitle = QLabel(subtitle_text); subtitle.setObjectName("settingsSubtitle"); subtitle.setWordWrap(True); section.addWidget(title); section.addWidget(subtitle)
         form = QGridLayout(); form.setHorizontalSpacing(18); form.setVerticalSpacing(11); form.setColumnMinimumWidth(0, 170); form.setColumnStretch(1, 1)
         for row, (label_text, widget) in enumerate(rows):
-            label = QLabel(label_text); label.setObjectName("fieldLabel"); label.setWordWrap(False); label.setMinimumWidth(145); form.addWidget(label, row, 0, Qt.AlignVCenter); form.addWidget(widget, row, 1)
+            label = QLabel(label_text); label.setObjectName("fieldLabel"); label.setWordWrap(False); label.setMinimumWidth(145)
+            # Tall fields (the URI editor) keep their label on the first line
+            # instead of floating halfway down an empty text box.
+            tall = widget.sizeHint().height() > 60 or widget.minimumHeight() > 60
+            form.addWidget(label, row, 0, Qt.AlignTop if tall else Qt.AlignVCenter)
+            if tall:
+                label.setContentsMargins(0, 9, 0, 0)
+            form.addWidget(widget, row, 1)
         section.addLayout(form); return frame
 
     def _clear_validation(self):
@@ -1771,7 +1876,7 @@ class CubeLoginDialog(QDialog):
 
         layout = QVBoxLayout(self); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(0)
         header = QFrame(); header.setObjectName("modalHeader"); header_layout = QHBoxLayout(header); header_layout.setContentsMargins(26, 21, 26, 19); header_layout.setSpacing(14)
-        header_icon = QLabel(); header_icon.setObjectName("modalIcon"); header_icon.setFixedSize(46, 46); header_icon.setPixmap(cyber_pixmap("lock", "#A855F7", 25)); header_layout.addWidget(header_icon)
+        header_icon = QLabel(); header_icon.setObjectName("modalIcon"); header_icon.setFixedSize(46, 46); header_icon.setPixmap(cyber_pixmap("lock", ICON_ACCENT, 25)); header_layout.addWidget(header_icon)
         header_copy = QVBoxLayout(); header_copy.setSpacing(4)
         heading = QLabel(t("ورود با تلگرام", "Sign in with Telegram")); heading.setObjectName("modalTitle")
         subtitle = QLabel(t("کد یک‌بارمصرف را از ربات @cubevvpn_bot دریافت می‌کنید.", "You'll receive a one-time code from @cubevvpn_bot.")); subtitle.setObjectName("modalSubtitle"); subtitle.setWordWrap(True)
@@ -1926,7 +2031,7 @@ class CubeServicesDialog(QDialog):
 
         layout = QVBoxLayout(self); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(0)
         header = QFrame(); header.setObjectName("modalHeader"); header_layout = QHBoxLayout(header); header_layout.setContentsMargins(26, 21, 26, 19); header_layout.setSpacing(14)
-        header_icon = QLabel(); header_icon.setObjectName("modalIcon"); header_icon.setFixedSize(46, 46); header_icon.setPixmap(cyber_pixmap("server", "#A855F7", 25)); header_layout.addWidget(header_icon)
+        header_icon = QLabel(); header_icon.setObjectName("modalIcon"); header_icon.setFixedSize(46, 46); header_icon.setPixmap(cyber_pixmap("server", ICON_ACCENT, 25)); header_layout.addWidget(header_icon)
         header_copy = QVBoxLayout(); header_copy.setSpacing(4)
         heading = QLabel(t("سرویس‌های خریداری‌شده", "Purchased services")); heading.setObjectName("modalTitle")
         subtitle = QLabel(t("هر سرویس را جداگانه به User Config اضافه کنید.", "Add each service to User Config individually.")); subtitle.setObjectName("modalSubtitle"); subtitle.setWordWrap(True)
@@ -2011,7 +2116,7 @@ class TuningDialog(QDialog):
         self.setLayoutDirection(Qt.LeftToRight if language == "en" else Qt.RightToLeft)
         root = QVBoxLayout(self); root.setContentsMargins(0, 0, 0, 0); root.setSpacing(0)
         header = QFrame(); header.setObjectName("modalHeader"); hl = QHBoxLayout(header); hl.setContentsMargins(28, 21, 28, 19); hl.setSpacing(14)
-        header_icon = QLabel(); header_icon.setObjectName("modalIcon"); header_icon.setFixedSize(46, 46); header_icon.setPixmap(cyber_pixmap("sliders", "#A855F7", 25)); hl.addWidget(header_icon)
+        header_icon = QLabel(); header_icon.setObjectName("modalIcon"); header_icon.setFixedSize(46, 46); header_icon.setPixmap(cyber_pixmap("sliders", ICON_ACCENT, 25)); hl.addWidget(header_icon)
         header_copy = QVBoxLayout(); header_copy.setSpacing(4)
         title = QLabel(self.t("تنظیمات پیشرفته", "Advanced Settings")); title.setObjectName("modalTitle")
         subtitle = QLabel(self.t(
@@ -2125,9 +2230,9 @@ class TuningDialog(QDialog):
         body_layout.addStretch(); scroll.setWidget(body); root.addWidget(scroll, 1)
 
         footer = QFrame(); footer.setObjectName("modalFooter"); fl = QHBoxLayout(footer); fl.setContentsMargins(24, 16, 24, 18)
-        reset = QPushButton(self.t("بازنشانی پیشنهادی", "Reset Recommended")); reset.setObjectName("modalSecondary"); reset.setIcon(cyber_icon("refresh", "#b7cce0", 18)); reset.clicked.connect(self._apply_recommended); fl.addWidget(reset)
-        fl.addStretch(); cancel = QPushButton(self.t("لغو", "Cancel")); cancel.setObjectName("modalSecondary"); cancel.setIcon(cyber_icon("x-circle", "#b7cce0", 18)); cancel.clicked.connect(self.reject)
-        save = QPushButton(self.t("ذخیره تنظیمات", "Save Settings")); save.setObjectName("modalPrimary"); save.setIcon(cyber_icon("check-circle", "#031422", 18)); save.setDefault(True); save.clicked.connect(self.accept)
+        reset = QPushButton(self.t("بازنشانی پیشنهادی", "Reset Recommended")); reset.setObjectName("modalSecondary"); reset.setIcon(cyber_icon("refresh", ICON_DIM, 18)); reset.clicked.connect(self._apply_recommended); fl.addWidget(reset)
+        fl.addStretch(); cancel = QPushButton(self.t("لغو", "Cancel")); cancel.setObjectName("modalSecondary"); cancel.setIcon(cyber_icon("x-circle", ICON_DIM, 18)); cancel.clicked.connect(self.reject)
+        save = QPushButton(self.t("ذخیره تنظیمات", "Save Settings")); save.setObjectName("modalPrimary"); save.setIcon(cyber_icon("check-circle", ICON_ON_ACCENT, 18)); save.setDefault(True); save.clicked.connect(self.accept)
         fl.addWidget(cancel); fl.addWidget(save); root.addWidget(footer)
         self.preset.currentTextChanged.connect(self._apply_preset)
         self.core_preset.currentTextChanged.connect(self._apply_core_preset)
@@ -2135,8 +2240,11 @@ class TuningDialog(QDialog):
 
     def _section(self, title_text, subtitle_text, rows, section_help=""):
         frame = QFrame(); frame.setObjectName("settingsSection"); layout = QVBoxLayout(frame); layout.setContentsMargins(18, 16, 18, 17); layout.setSpacing(12)
-        heading = QHBoxLayout(); title = QLabel(title_text); title.setObjectName("settingsTitle"); heading.addWidget(title); heading.addStretch()
+        # The section help sits beside its title. The trailing stretch pushed it
+        # to the far edge of the card, where it read as an unrelated stray dot.
+        heading = QHBoxLayout(); heading.setSpacing(8); title = QLabel(title_text); title.setObjectName("settingsTitle"); heading.addWidget(title)
         if section_help: heading.addWidget(HelpDot(section_help, self.language == "fa"))
+        heading.addStretch()
         subtitle = QLabel(subtitle_text); subtitle.setObjectName("settingsSubtitle"); subtitle.setWordWrap(True)
         layout.addLayout(heading); layout.addWidget(subtitle)
         grid = QGridLayout(); grid.setHorizontalSpacing(18); grid.setVerticalSpacing(12); grid.setColumnMinimumWidth(0, 185); grid.setColumnStretch(1, 1)
@@ -2323,7 +2431,7 @@ class MainWindow(QMainWindow):
     def _action_button(self, persian, english, icon_name, object_name="secondaryAction"):
         button = GlowButton()
         button.setObjectName(object_name)
-        button.setIcon(cyber_icon(icon_name, "#bfefff", 18))
+        button.setIcon(cyber_icon(icon_name, ICON_DIM, 18))
         button.setIconSize(QSize(18, 18))
         button.setCursor(Qt.PointingHandCursor)
         self._bind_text(button, persian, english)
@@ -2344,7 +2452,7 @@ class MainWindow(QMainWindow):
         header = LuminousPageHeader()
         layout = QHBoxLayout(header); layout.setContentsMargins(19, 14, 19, 15); layout.setSpacing(16)
         icon = QLabel(); icon.setObjectName("pageHeaderIcon"); icon.setFixedSize(54, 54)
-        icon.setAlignment(Qt.AlignCenter); icon.setPixmap(cyber_pixmap(icon_name, "#8efff4", 27))
+        icon.setAlignment(Qt.AlignCenter); icon.setPixmap(cyber_pixmap(icon_name, ICON_ACCENT, 27))
         layout.addWidget(icon, 0, Qt.AlignVCenter)
         copy = QVBoxLayout(); copy.setSpacing(3)
         kicker = self._bind_text(QLabel(), persian_kicker, english_kicker); kicker.setObjectName("pageEyebrow")
@@ -2369,9 +2477,12 @@ class MainWindow(QMainWindow):
             toggle, row_click_enabled=row_click_enabled
         ); wrapper.setObjectName("toggleOption")
         layout = QHBoxLayout(wrapper); layout.setContentsMargins(10, 7, 10, 7); layout.setSpacing(10)
-        label = self._bind_text(QLabel(), persian, english); label.setObjectName("controlLabel")
+        # Elided, not clipped: "Pick Best in List" is longer than its column and
+        # used to run off the edge of the tile.
+        label = self._bind_text(ElidedLabel(), persian, english); label.setObjectName("controlLabel")
+        label.setToolTip(persian if self.language != "en" else english)
         label.setAttribute(Qt.WA_TransparentForMouseEvents)
-        layout.addWidget(toggle); layout.addWidget(label); layout.addStretch()
+        layout.addWidget(toggle); layout.addWidget(label, 1)
         toggle.setAccessibleName(english)
         return wrapper
 
@@ -2379,13 +2490,13 @@ class MainWindow(QMainWindow):
         root = CyberRoot(); self.setCentralWidget(root); layout = QHBoxLayout(root); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(0)
         sidebar = QFrame(); self.sidebar = sidebar; sidebar.setObjectName("sidebar"); sidebar.setAttribute(Qt.WA_StyledBackground, True); sidebar.setFixedWidth(286); side = QVBoxLayout(sidebar); self.sidebar_layout = side; side.setContentsMargins(18, 20, 18, 18); side.setSpacing(4)
         logo = QFrame(); self.logo_card = logo; logo.setObjectName("logoCard"); logo.setMinimumHeight(88); logo_layout = QHBoxLayout(logo); logo_layout.setContentsMargins(14, 12, 14, 12); logo_layout.setSpacing(12)
-        mark = QLabel(); mark.setObjectName("logoMark"); mark.setAlignment(Qt.AlignCenter); mark.setFixedSize(52, 52); mark.setPixmap(cyber_pixmap("shield", "#031422", 29)); logo_layout.addWidget(mark)
+        mark = QLabel(); mark.setObjectName("logoMark"); mark.setAlignment(Qt.AlignCenter); mark.setFixedSize(52, 52); mark.setPixmap(cyber_pixmap("shield", ICON_ON_ACCENT, 29)); logo_layout.addWidget(mark)
         logo_text = QVBoxLayout(); logo_text.setSpacing(2); brand = QLabel("CUBEVPN"); brand.setObjectName("brand"); logo_text.addWidget(brand); version = QLabel(f"DESKTOP  {__version__}"); version.setObjectName("version"); version.setLayoutDirection(Qt.LeftToRight); logo_text.addWidget(version); logo_layout.addLayout(logo_text, 1); side.addWidget(logo); side.addSpacing(16)
         self.nav = []
         entries = [("home", "خانه", "Home"), ("file-cog", "کانفیگ‌ها", "Configs"), ("activity", "لاگ زنده", "Live Logs"), ("shield", "عبور مستقیم برنامه‌ها", "App Bypass"), ("wrench", "ابزارها", "Tools"), ("headphones", "پشتیبانی", "Support")]
         self.nav_meta = []
         for index, (icon_name, name, english) in enumerate(entries):
-            button = NavButton(english if self.language == "en" else name); button.setIcon(cyber_icon(icon_name, "#9fb4d8", 22)); button.setIconSize(QSize(22, 22)); button.setProperty("iconName", icon_name); button.clicked.connect(lambda _, i=index: self.show_page(i)); side.addWidget(button); self.nav.append(button)
+            button = NavButton(english if self.language == "en" else name); button.setIcon(cyber_icon(icon_name, ICON_DIM, 22)); button.setIconSize(QSize(22, 22)); button.setProperty("iconName", icon_name); button.clicked.connect(lambda _, i=index: self.show_page(i)); side.addWidget(button); self.nav.append(button)
             self.nav_meta.append((icon_name, name, english))
         side.addStretch()
         self.rating_card = QFrame(); self.rating_card.setObjectName("ratingCard"); self.rating_card.setMinimumHeight(136); rating_layout = QVBoxLayout(self.rating_card); rating_layout.setContentsMargins(15, 13, 15, 13); rating_layout.setSpacing(4)
@@ -2394,8 +2505,8 @@ class MainWindow(QMainWindow):
         self.rating_button = self._action_button("ستاره در گیت‌هاب", "Star on GitHub", "external-link", "ratingButton"); self.rating_button.setMinimumHeight(40); self.rating_button.clicked.connect(lambda: webbrowser.open(PROJECT_URL))
         rating_layout.addWidget(self.rating_title); rating_layout.addWidget(self.rating_text); rating_layout.addWidget(self.rating_button); side.addWidget(self.rating_card); side.addSpacing(10)
         footer = QFrame(); self.sidebar_footer = footer; footer.setObjectName("sidebarFooter"); footer_layout = QVBoxLayout(footer); footer_layout.setContentsMargins(7, 7, 7, 7); footer_layout.setSpacing(4)
-        self.language_button = QPushButton("English"); self.language_button.setObjectName("footerAction"); self.language_button.setMinimumHeight(44); self.language_button.setIcon(cyber_icon("globe", "#9fb4d8", 19)); self.language_button.setIconSize(QSize(19, 19)); self.language_button.clicked.connect(self.toggle_language); footer_layout.addWidget(self.language_button)
-        self.data_button = QPushButton("باز کردن پوشه داده‌ها"); self.data_button.setObjectName("footerAction"); self.data_button.setMinimumHeight(44); self.data_button.setIcon(cyber_icon("folder", "#9fb4d8", 19)); self.data_button.setIconSize(QSize(19, 19)); self.data_button.clicked.connect(lambda: os.startfile(DATA_DIR)); footer_layout.addWidget(self.data_button); side.addWidget(footer)
+        self.language_button = QPushButton("English"); self.language_button.setObjectName("footerAction"); self.language_button.setMinimumHeight(44); self.language_button.setIcon(cyber_icon("globe", ICON_DIM, 19)); self.language_button.setIconSize(QSize(19, 19)); self.language_button.clicked.connect(self.toggle_language); footer_layout.addWidget(self.language_button)
+        self.data_button = QPushButton("باز کردن پوشه داده‌ها"); self.data_button.setObjectName("footerAction"); self.data_button.setMinimumHeight(44); self.data_button.setIcon(cyber_icon("folder", ICON_DIM, 19)); self.data_button.setIconSize(QSize(19, 19)); self.data_button.clicked.connect(lambda: os.startfile(DATA_DIR)); footer_layout.addWidget(self.data_button); side.addWidget(footer)
         layout.addWidget(sidebar)
         content_shell = QFrame(); content_shell.setObjectName("contentShell"); content_layout = QVBoxLayout(content_shell); content_layout.setContentsMargins(0, 0, 0, 0); content_layout.setSpacing(0)
         self.stack = QStackedWidget(); self.stack.setObjectName("content"); content_layout.addWidget(self.stack, 1)
@@ -2416,13 +2527,13 @@ class MainWindow(QMainWindow):
         self.home_header = self._page_header("کنترل اتصال", "Connection Center", f"نسخه دسکتاپ با استفاده از {ltr_isolate('Xray')}، پروکسی سیستم ویندوز و هسته {ltr_isolate('Patterniha Wrong-Sequence')}", "Desktop engine powered by Xray, Windows System Proxy and native TLS fragmentation", self.status_pill); root.addWidget(self.home_header)
         hero = HeroCard(); self.hero_card = hero; hero.setMinimumHeight(318); hero_layout = QHBoxLayout(hero); self.hero_layout = hero_layout; hero_layout.setContentsMargins(38, 28, 34, 28); hero_layout.setSpacing(34)
         hero_copy = QVBoxLayout(); self.hero_copy_layout = hero_copy; hero_copy.setSpacing(9)
-        eyebrow = QHBoxLayout(); eyebrow.setSpacing(9); eyebrow_icon = QLabel(); eyebrow_icon.setPixmap(cyber_pixmap("lock", "#A855F7", 18)); eyebrow_icon.setFixedSize(20, 20)
+        eyebrow = QHBoxLayout(); eyebrow.setSpacing(9); eyebrow_icon = QLabel(); eyebrow_icon.setPixmap(cyber_pixmap("lock", ICON_ACCENT, 18)); eyebrow_icon.setFixedSize(20, 20)
         self.hero_badge = self._bind_text(QLabel(), "تونل امن دسکتاپ", "SECURE DESKTOP TUNNEL"); self.hero_badge.setObjectName("heroBadge")
         eyebrow.addWidget(eyebrow_icon); eyebrow.addWidget(self.hero_badge); eyebrow.addStretch(); hero_copy.addLayout(eyebrow)
         self.status = QLabel(f"{ltr_isolate('VPN')} خاموش است"); self.status.setObjectName("heroStatus"); self.status.setWordWrap(True); self.status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred); hero_copy.addWidget(self.status)
         self.connection_hint = QLabel("آماده اتصال"); self.connection_hint.setObjectName("heroHint"); self.connection_hint.setWordWrap(True); self.connection_hint.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred); hero_copy.addWidget(self.connection_hint)
         hero_copy.addStretch()
-        self.connect_button = GlowButton("اتصال"); self.connect_button.setObjectName("connectButton"); self.connect_button.setProperty("state", "idle"); self.connect_button.setIcon(cyber_icon("play", "#031422", 21)); self.connect_button.setIconSize(QSize(21, 21)); self.connect_button.setMinimumSize(216, 60); self.connect_button.setMaximumWidth(260); self.connect_button.setCursor(Qt.PointingHandCursor); hero_copy.addWidget(self.connect_button)
+        self.connect_button = GlowButton("اتصال"); self.connect_button.setObjectName("connectButton"); self.connect_button.setProperty("state", "idle"); self.connect_button.setIcon(cyber_icon("play", ICON_ON_ACCENT, 21)); self.connect_button.setIconSize(QSize(21, 21)); self.connect_button.setMinimumSize(216, 60); self.connect_button.setMaximumWidth(260); self.connect_button.setCursor(Qt.PointingHandCursor); hero_copy.addWidget(self.connect_button)
         hero_layout.addLayout(hero_copy, 3)
         orb_shell = QFrame(); self.orb_shell = orb_shell; orb_shell.setObjectName("orbShell"); orb_shell.setMinimumWidth(284); orb_layout = QVBoxLayout(orb_shell); orb_layout.setContentsMargins(18, 8, 18, 10); orb_layout.setSpacing(2)
         self.orb = ConnectionOrb(); orb_caption = QLabel("NETWORK CORE"); orb_caption.setObjectName("orbCaption"); orb_caption.setAlignment(Qt.AlignCenter); orb_layout.addWidget(self.orb, alignment=Qt.AlignCenter); orb_layout.addWidget(orb_caption)
@@ -2430,7 +2541,7 @@ class MainWindow(QMainWindow):
 
         self.country_card = QFrame(); self.country_card.setObjectName("countrySelectorCard"); self.country_card.setMinimumHeight(104)
         country_layout = QHBoxLayout(self.country_card); self.country_layout = country_layout; country_layout.setContentsMargins(16, 10, 16, 10); country_layout.setSpacing(12)
-        country_icon = QLabel(); self.country_icon = country_icon; country_icon.setObjectName("countryIcon"); country_icon.setFixedSize(46, 46); country_icon.setAlignment(Qt.AlignCenter); country_icon.setPixmap(cyber_pixmap("globe", "#be78ff", 24)); country_layout.addWidget(country_icon, 0, Qt.AlignVCenter)
+        country_icon = QLabel(); self.country_icon = country_icon; country_icon.setObjectName("countryIcon"); country_icon.setFixedSize(46, 46); country_icon.setAlignment(Qt.AlignCenter); country_icon.setPixmap(cyber_pixmap("globe", ICON_ACCENT, 24)); country_layout.addWidget(country_icon, 0, Qt.AlignVCenter)
         country_copy = QVBoxLayout(); country_copy.setSpacing(3)
         self.country_eyebrow = self._bind_text(QLabel(), "انتخاب هوشمند مسیر", "SMART ROUTE SELECTION"); self.country_eyebrow.setObjectName("countryEyebrow")
         self.country_title = self._bind_text(QLabel(), "کشور خروجی", "Exit country"); self.country_title.setObjectName("countryTitle")
@@ -2475,7 +2586,7 @@ class MainWindow(QMainWindow):
         self.gateway_devices_badge = QToolButton()
         self.gateway_devices_badge.setObjectName("gatewayDevicesBadge")
         self.gateway_devices_badge.setText("0")
-        self.gateway_devices_badge.setIcon(cyber_icon("wifi", "#72eee7", 14))
+        self.gateway_devices_badge.setIcon(cyber_icon("wifi", ICON_ACCENT, 14))
         self.gateway_devices_badge.setIconSize(QSize(14, 14))
         self.gateway_devices_badge.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.gateway_devices_badge.setCursor(Qt.PointingHandCursor)
@@ -2496,7 +2607,7 @@ class MainWindow(QMainWindow):
         ))
         self.proxy_option.setEnabled(not self.tun_mode.isChecked())
         self.carrier = QComboBox(); self.carrier.setObjectName("carrierModeCombo"); self.carrier.addItems(["auto", "mci", "irancell"]); self.carrier.setCurrentText(self.storage.tuning.carrier_mode); self.carrier.setMinimumWidth(100); self.carrier.setMaximumWidth(120); self.carrier.setAccessibleName("Carrier")
-        self.carrier_control = QFrame(); self.carrier_control.setObjectName("carrierControl"); self.carrier_control.setMinimumWidth(190); self.carrier_control.setMaximumWidth(220); carrier_layout = QHBoxLayout(self.carrier_control); self.carrier_layout = carrier_layout; carrier_layout.setContentsMargins(7, 3, 7, 3); carrier_layout.setSpacing(6); self.carrier_label = self._bind_text(QLabel(), "اپراتور", "Carrier"); self.carrier_label.setObjectName("controlLabel"); carrier_layout.addWidget(self.carrier_label); carrier_layout.addWidget(self.carrier)
+        self.carrier_control = QFrame(); self.carrier_control.setObjectName("carrierControl"); self.carrier_control.setMinimumWidth(190); carrier_layout = QHBoxLayout(self.carrier_control); self.carrier_layout = carrier_layout; carrier_layout.setContentsMargins(10, 3, 10, 3); carrier_layout.setSpacing(6); self.carrier_label = self._bind_text(QLabel(), "اپراتور", "Carrier"); self.carrier_label.setObjectName("controlLabel"); carrier_layout.addWidget(self.carrier_label); carrier_layout.addStretch(); carrier_layout.addWidget(self.carrier)
         self.tune_button = self._action_button("تنظیمات پیشرفته", "Advanced Settings", "settings", "advancedButton"); self.tune_button.setProperty("chevron", True); self.tune_button.setIconSize(QSize(19, 19)); self.tune_button.clicked.connect(self.open_tuning)
         root.addWidget(controls)
         self._layout_home_dashboard()
@@ -2544,17 +2655,18 @@ class MainWindow(QMainWindow):
             option.layout().setContentsMargins(7, 5, 7, 5)
             option.layout().setSpacing(7)
         if compact:
+            # Four equal columns, no spans: the two rows line up. The old grid
+            # gave one cell a 2-column span, so nothing below it lined up with
+            # anything above it.
             self.controls_layout.addWidget(self.auto_option, 0, 0)
-            self.controls_layout.addWidget(self.manual_option, 0, 1, 1, 2)
-            self.controls_layout.addWidget(self.gateway_option, 0, 3)
-            self.controls_layout.addWidget(self.proxy_option, 1, 0)
-            self.controls_layout.addWidget(self.tun_option, 1, 1)
-            self.controls_layout.addWidget(self.carrier_control, 1, 2)
-            self.controls_layout.addWidget(self.tune_button, 1, 3)
-            self.controls_layout.setColumnStretch(0, 1)
-            self.controls_layout.setColumnStretch(1, 1)
-            self.controls_layout.setColumnStretch(2, 1)
-            self.controls_layout.setColumnStretch(3, 1)
+            self.controls_layout.addWidget(self.manual_option, 0, 1)
+            self.controls_layout.addWidget(self.proxy_option, 0, 2)
+            self.controls_layout.addWidget(self.tun_option, 0, 3)
+            self.controls_layout.addWidget(self.gateway_option, 1, 0)
+            self.controls_layout.addWidget(self.carrier_control, 1, 1)
+            self.controls_layout.addWidget(self.tune_button, 1, 2, 1, 2)
+            for column in range(4):
+                self.controls_layout.setColumnStretch(column, 1)
             self.tune_button.setMaximumWidth(16777215)
         else:
             self.controls_layout.addWidget(self.auto_option, 0, 0)
@@ -2755,10 +2867,10 @@ class MainWindow(QMainWindow):
         if self._cube_auth_token():
             name = self._cube_auth_display_name() or self.tr("حساب من", "My Account")
             button.setText(self.tr(f"سرویس‌های من ({name})", f"My Services ({name})"))
-            button.setIcon(cyber_icon("server", "#A855F7", 16))
+            button.setIcon(cyber_icon("server", ICON_ACCENT, 16))
         else:
             button.setText(self.tr("ورود به حساب", "Sign In"))
-            button.setIcon(cyber_icon("lock", "#A855F7", 16))
+            button.setIcon(cyber_icon("lock", ICON_ACCENT, 16))
 
     def _account_button_clicked(self) -> None:
         if self._cube_auth_token():
@@ -2852,7 +2964,7 @@ class MainWindow(QMainWindow):
         self.process_count_label = QLabel("0 selected"); self.process_count_label.setObjectName("summaryPill"); self.process_count_label.setLayoutDirection(Qt.LeftToRight)
         root.addWidget(self._page_header("عبور مستقیم برنامه‌ها", "App Bypass", "پردازه‌هایی را انتخاب کنید که مستقیم و خارج از تونل کار کنند", "Choose which running apps connect directly outside the tunnel", self.process_count_label))
         toolbar = QFrame(); toolbar.setObjectName("pageToolbar"); toolbar_layout = QHBoxLayout(toolbar); toolbar_layout.setContentsMargins(12, 9, 12, 9); toolbar_layout.setSpacing(10)
-        search_wrap = QFrame(); search_wrap.setObjectName("searchWrap"); search_layout = QHBoxLayout(search_wrap); search_layout.setContentsMargins(10, 0, 8, 0); search_layout.setSpacing(7); search_icon = QLabel(); search_icon.setPixmap(cyber_pixmap("search", "#7fa2c5", 18)); search_layout.addWidget(search_icon)
+        search_wrap = QFrame(); search_wrap.setObjectName("searchWrap"); search_layout = QHBoxLayout(search_wrap); search_layout.setContentsMargins(10, 0, 8, 0); search_layout.setSpacing(7); search_icon = QLabel(); search_icon.setPixmap(cyber_pixmap("search", ICON_MUTED, 18)); search_layout.addWidget(search_icon)
         self.process_search = QLineEdit(); self.process_search.setObjectName("processSearch"); self.process_search.setPlaceholderText(self.tr("جستجوی پردازه…", "Search processes…")); self.process_search.setClearButtonEnabled(True); search_layout.addWidget(self.process_search); toolbar_layout.addWidget(search_wrap, 1)
         self.process_refresh_btn = self._action_button("به‌روزرسانی فهرست", "Refresh Process List", "refresh", "secondaryAction"); self.process_refresh_btn.clicked.connect(self.refresh_processes); toolbar_layout.addWidget(self.process_refresh_btn); root.addWidget(toolbar)
         table_frame = QFrame(); table_frame.setObjectName("tableFrame"); table_layout = QVBoxLayout(table_frame); table_layout.setContentsMargins(0, 0, 0, 0)
@@ -2873,7 +2985,7 @@ class MainWindow(QMainWindow):
         ]
         for index, (icon_name, fa_title, en_title, fa_desc, en_desc, action, available) in enumerate(tool_specs):
             box = MotionFrame(); box.setObjectName("toolCard"); l = QVBoxLayout(box); l.setContentsMargins(18, 18, 18, 17); l.setSpacing(10)
-            top = QHBoxLayout(); icon_label = QLabel(); icon_label.setObjectName("toolIcon"); icon_label.setFixedSize(42, 42); icon_label.setPixmap(cyber_pixmap(icon_name, "#A855F7", 23)); status = QLabel(); self._bind_text(status, "آماده" if available else "در دسترس نیست", "Ready" if available else "Unavailable"); status.setObjectName("toolStatus"); status.setProperty("available", available); top.addWidget(icon_label); top.addStretch(); top.addWidget(status); l.addLayout(top)
+            top = QHBoxLayout(); icon_label = QLabel(); icon_label.setObjectName("toolIcon"); icon_label.setFixedSize(42, 42); icon_label.setPixmap(cyber_pixmap(icon_name, ICON_ACCENT, 23)); status = QLabel(); self._bind_text(status, "آماده" if available else "در دسترس نیست", "Ready" if available else "Unavailable"); status.setObjectName("toolStatus"); status.setProperty("available", available); top.addWidget(icon_label); top.addStretch(); top.addWidget(status); l.addLayout(top)
             title = self._bind_text(QLabel(), fa_title, en_title); title.setObjectName("toolTitle"); desc = self._bind_text(QLabel(), fa_desc, en_desc); desc.setObjectName("toolDescription"); desc.setWordWrap(True); desc.setTextInteractionFlags(Qt.TextSelectableByMouse); l.addWidget(title); l.addWidget(desc); l.addStretch()
             button = self._action_button("اجرا", "Run", "play", "toolAction"); button.setEnabled(available); button.clicked.connect(action); l.addWidget(button)
             self.tool_cards.append(box)
@@ -2891,13 +3003,19 @@ class MainWindow(QMainWindow):
         page, body = self._scroll_page(); root = QVBoxLayout(body); root.setContentsMargins(34, 28, 34, 26); root.setSpacing(16)
         root.addWidget(self._page_header("پشتیبانی و بروزرسانی", "Support & Updates", "کیوب‌وی‌پی‌ان — سازگار با کانفیگ‌های نسخه موبایل", "CubeVPN — compatible with mobile profiles"))
         hero = MotionFrame(); hero.setObjectName("supportHero"); hero_layout = QHBoxLayout(hero); hero_layout.setContentsMargins(24, 22, 24, 22); hero_layout.setSpacing(20)
-        icon_box = QLabel(); icon_box.setObjectName("supportIcon"); icon_box.setFixedSize(72, 72); icon_box.setPixmap(cyber_pixmap("shield", "#A855F7", 38)); hero_layout.addWidget(icon_box)
+        icon_box = QLabel(); icon_box.setObjectName("supportIcon"); icon_box.setFixedSize(72, 72); icon_box.setPixmap(cyber_pixmap("shield", ICON_ACCENT, 38)); hero_layout.addWidget(icon_box)
         copy_box = QVBoxLayout(); support_title = self._bind_text(QLabel(), "پشتیبانی رسمی کیوب‌وی‌پی‌ان", "Official CubeVPN Support"); support_title.setObjectName("supportTitle"); support_desc = self._bind_text(QLabel(), "برای خبرهای نسخه، راهنما و ارتباط با جامعه از کانال‌های رسمی استفاده کنید.", "Use the official channels for release news, help and community updates."); support_desc.setObjectName("supportDescription"); support_desc.setWordWrap(True); support_desc.setTextInteractionFlags(Qt.TextSelectableByMouse); copy_box.addWidget(support_title); copy_box.addWidget(support_desc); hero_layout.addLayout(copy_box, 1)
-        actions = QVBoxLayout(); github = self._action_button("پروژه GitHub", "GitHub Project", "external-link", "primaryAction"); github.clicked.connect(lambda: webbrowser.open(self.storage.settings.get("update_repo_url", DEFAULT_UPDATE_REPO_URL))); telegram = self._action_button("کانال تلگرام", "Telegram Channel", "external-link", "secondaryAction"); telegram.clicked.connect(lambda: webbrowser.open("https://t.me/cube_vpnn")); actions.addWidget(github); actions.addWidget(telegram); hero_layout.addLayout(actions); root.addWidget(hero)
+        # Stacked buttons share one width; ragged right edges were the loudest
+        # "unfinished" tell on this page.
+        actions = QVBoxLayout(); actions.setSpacing(8); github = self._action_button("پروژه GitHub", "GitHub Project", "external-link", "primaryAction"); github.clicked.connect(lambda: webbrowser.open(self.storage.settings.get("update_repo_url", DEFAULT_UPDATE_REPO_URL))); telegram = self._action_button("کانال تلگرام", "Telegram Channel", "external-link", "secondaryAction"); telegram.clicked.connect(lambda: webbrowser.open("https://t.me/cube_vpnn"))
+        for button in (github, telegram):
+            button.setMinimumWidth(176)
+            button.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
+        actions.addWidget(github); actions.addWidget(telegram); actions.addStretch(); hero_layout.addLayout(actions); root.addWidget(hero)
 
         self.update_card = MotionFrame(); self.update_card.setObjectName("updateCard"); self.update_card.setProperty("state", "idle")
         update_layout = QHBoxLayout(self.update_card); update_layout.setContentsMargins(20, 17, 20, 17); update_layout.setSpacing(16)
-        update_icon = QLabel(); update_icon.setObjectName("updateIcon"); update_icon.setFixedSize(48, 48); update_icon.setPixmap(cyber_pixmap("refresh", "#A855F7", 25)); update_layout.addWidget(update_icon)
+        update_icon = QLabel(); update_icon.setObjectName("updateIcon"); update_icon.setFixedSize(48, 48); update_icon.setPixmap(cyber_pixmap("refresh", ICON_ACCENT, 25)); update_layout.addWidget(update_icon)
         update_copy = QVBoxLayout(); update_copy.setSpacing(4)
         update_title = self._bind_text(QLabel(), "بروزرسانی برنامه", "Application Update"); update_title.setObjectName("updateTitle")
         self.update_status = QLabel(self.tr("برای بررسی نسخه آماده است", "Ready to check for updates")); self.update_status.setObjectName("updateStatus"); self.update_status.setWordWrap(True)
@@ -2906,6 +3024,9 @@ class MainWindow(QMainWindow):
         update_actions = QVBoxLayout(); update_actions.setSpacing(7)
         self.update_check_button = self._action_button("بررسی دوباره", "Check Again", "refresh", "secondaryAction"); self.update_check_button.clicked.connect(lambda: self.check_for_updates(manual=True))
         self.update_download_button = self._action_button("دریافت بروزرسانی", "Download Update", "download", "primaryAction"); self.update_download_button.setEnabled(False); self.update_download_button.clicked.connect(self._open_latest_update)
+        for button in (self.update_check_button, self.update_download_button):
+            button.setMinimumWidth(176)
+            button.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
         update_actions.addWidget(self.update_check_button); update_actions.addWidget(self.update_download_button); update_layout.addLayout(update_actions); root.addWidget(self.update_card)
         info_grid = QGridLayout(); info_grid.setSpacing(14)
         support_cards = [
@@ -2914,7 +3035,7 @@ class MainWindow(QMainWindow):
             ("gauge", "انتخاب بهترین کانفیگ", "Pick the best config", "گزینه «انتخاب بهترین کانفیگ از لیست» را در صفحه اصلی روشن کنید تا اتصال خودکار سالم‌ترین کانفیگ فهرست شما را انتخاب کند.", "Enable \"Pick Best in List\" on Home so Auto Mode always connects your healthiest config."),
         ]
         for index, (icon_name, fa_title, en_title, fa_body, en_body) in enumerate(support_cards):
-            box = MotionFrame(); box.setObjectName("helpCard"); l = QVBoxLayout(box); l.setContentsMargins(18, 17, 18, 17); l.setSpacing(9); icon_label = QLabel(); icon_label.setObjectName("helpIcon"); icon_label.setPixmap(cyber_pixmap(icon_name, "#C026D3", 23)); icon_label.setFixedSize(38, 38); icon_label.setAlignment(Qt.AlignCenter); title = self._bind_text(QLabel(), fa_title, en_title); title.setObjectName("helpTitle"); text = self._bind_text(QLabel(), fa_body, en_body); text.setObjectName("helpText"); text.setWordWrap(True); text.setTextInteractionFlags(Qt.TextSelectableByMouse); l.addWidget(icon_label); l.addWidget(title); l.addWidget(text); l.addStretch(); info_grid.addWidget(box, 0, index)
+            box = MotionFrame(); box.setObjectName("helpCard"); l = QVBoxLayout(box); l.setContentsMargins(18, 17, 18, 17); l.setSpacing(9); icon_label = QLabel(); icon_label.setObjectName("helpIcon"); icon_label.setPixmap(cyber_pixmap(icon_name, ICON_ACCENT, 23)); icon_label.setFixedSize(38, 38); icon_label.setAlignment(Qt.AlignCenter); title = self._bind_text(QLabel(), fa_title, en_title); title.setObjectName("helpTitle"); text = self._bind_text(QLabel(), fa_body, en_body); text.setObjectName("helpText"); text.setWordWrap(True); text.setTextInteractionFlags(Qt.TextSelectableByMouse); l.addWidget(icon_label); l.addWidget(title); l.addWidget(text); l.addStretch(); info_grid.addWidget(box, 0, index)
         root.addLayout(info_grid); credits = QLabel(f"CubeVPN {__version__}  •  based on UAC Spoofer Desktop by Floxu1 & Patterniha"); credits.setObjectName("credits"); credits.setAlignment(Qt.AlignCenter); credits.setLayoutDirection(Qt.LeftToRight); root.addWidget(credits); root.addStretch(); return page
 
     def _wire(self):
@@ -2926,52 +3047,23 @@ class MainWindow(QMainWindow):
             return
         icon = QApplication.windowIcon()
         if icon.isNull():
-            icon = cyber_icon("shield", "#A855F7", 24)
+            icon = cyber_icon("shield", ICON_ACCENT, 24)
         self._tray = QSystemTrayIcon(icon, self)
         self._tray_menu = QMenu(self)
         self._tray_menu.setObjectName("trayMenu")
         self._tray_menu.setMinimumWidth(220)
         self._tray_menu.setFont(QFont("Vazirmatn", 10))
-        self._tray_menu.setStyleSheet("""
-            QMenu#trayMenu {
-                background-color: #07172c;
-                color: #e8f5ff;
-                border: 1px solid #245877;
-                border-radius: 11px;
-                padding: 8px;
-            }
-            QMenu#trayMenu::item {
-                min-height: 32px;
-                padding: 7px 38px 7px 16px;
-                margin: 2px 3px;
-                border-radius: 8px;
-                background: transparent;
-            }
-            QMenu#trayMenu::item:selected {
-                background-color: #0d5260;
-                color: #ffffff;
-            }
-            QMenu#trayMenu::item:disabled {
-                color: #67839d;
-            }
-            QMenu#trayMenu::icon {
-                padding-left: 9px;
-                padding-right: 9px;
-            }
-            QMenu#trayMenu::separator {
-                height: 1px;
-                background: #1d425d;
-                margin: 6px 10px;
-            }
-        """)
+        # The tray menu is a native popup outside the app stylesheet, so it gets
+        # its own sheet — built from the same tokens so it matches the window.
+        self._tray_menu.setStyleSheet(TRAY_MENU_STYLE)
         self.tray_show_action = QAction(self._tray_menu)
-        self.tray_show_action.setIcon(cyber_icon("home", "#A855F7", 18))
+        self.tray_show_action.setIcon(cyber_icon("home", ICON_ACCENT, 18))
         self.tray_show_action.setIconVisibleInMenu(True)
         self.tray_show_action.triggered.connect(self._restore_from_tray)
         self._tray_menu.addAction(self.tray_show_action)
         self._tray_menu.addSeparator()
         self.tray_quit_action = QAction(self._tray_menu)
-        self.tray_quit_action.setIcon(cyber_icon("power", "#ff7891", 18))
+        self.tray_quit_action.setIcon(cyber_icon("power", ICON_DANGER, 18))
         self.tray_quit_action.setIconVisibleInMenu(True)
         self.tray_quit_action.triggered.connect(self._quit_from_tray)
         self._tray_menu.addAction(self.tray_quit_action)
@@ -3050,7 +3142,7 @@ class MainWindow(QMainWindow):
         for i, button in enumerate(self.nav):
             active = i == index
             button.setChecked(active)
-            button.setIcon(cyber_icon(button.property("iconName"), "#A855F7" if active else "#9fb4d8", 22))
+            button.setIcon(cyber_icon(button.property("iconName"), ICON_ACCENT if active else ICON_DIM, 22))
         if _animations_enabled():
             page = self.stack.currentWidget()
             effect = QGraphicsOpacityEffect(page); page.setGraphicsEffect(effect); effect.setOpacity(0.0)
@@ -3195,7 +3287,7 @@ class MainWindow(QMainWindow):
         for index, (button, (icon_name, persian, english)) in enumerate(zip(self.nav, self.nav_meta)):
             button.setText(english if self.language == "en" else persian)
             button.setProperty("rtl", self.language != "en"); _restyle(button)
-            button.setIcon(cyber_icon(icon_name, "#A855F7" if index == self.stack.currentIndex() else "#9fb4d8", 22))
+            button.setIcon(cyber_icon(icon_name, ICON_ACCENT if index == self.stack.currentIndex() else "#9fb4d8", 22))
         self.language_button.setText("فارسی" if self.language == "en" else "English")
         self.data_button.setText(self.tr("باز کردن پوشه داده‌ها", "Open Data Folder"))
         self._sync_sidebar_language_layout()
@@ -4482,7 +4574,7 @@ class MainWindow(QMainWindow):
         if hasattr(self.country_combo.view(), "setSpacing"):
             self.country_combo.view().setSpacing(3)
         all_text = self.tr("همه کشورها", "All countries")
-        self.country_combo.addItem(cyber_icon("globe", "#be78ff", 19), all_text, "ALL")
+        self.country_combo.addItem(cyber_icon("globe", ICON_ACCENT, 19), all_text, "ALL")
         for code in country_codes:
             _flag, english, persian = self._country_metadata(code)
             count = len(self._country_profiles(code))
@@ -4893,16 +4985,18 @@ class MainWindow(QMainWindow):
                     count = user_country_counts.get(code, 0)
                     header = QListWidgetItem(self.tr(
                         f"{title}  ·  {count} کانفیگ",
-                        f"{title}  ·  {count} configs",
+                        f"{title}  ·  {count} config{'s' if count != 1 else ''}",
                     ))
                     header.setData(Qt.UserRole, None)
                     header.setData(Qt.UserRole + 1, "country-header")
                     header.setFlags(Qt.NoItemFlags)
                     header.setIcon(country_flag_icon(code, 30, 20))
-                    header.setForeground(QColor("#79efe7"))
-                    header.setBackground(QColor(8, 47, 66, 185))
+                    # Colours come from the stylesheet's :disabled rule. Setting
+                    # them here as well left two sources fighting over the same
+                    # item, so the separator rendered as a filled bar that read
+                    # like a selected row.
                     font = header.font(); font.setBold(True); header.setFont(font)
-                    header.setSizeHint(QSize(0, 32))
+                    header.setSizeHint(QSize(0, 34))
                     self.user_config_list.addItem(header)
             benchmark = benchmarks.get(profile.id, {})
             recommendation = ""
@@ -4926,7 +5020,9 @@ class MainWindow(QMainWindow):
                     quality_text = self.tr("آپلود در حال ارزیابی", "upload pending")
                 startup_label = "Page" if carrier == "mci" else "YouTube"
                 recommendation = f"{tag}  ·  Score {score}  ·  {startup_label} {startup_ms / 1000:.2f}s  ·  {quality_text}\n"
-            endpoint = f"\u2066{self._profile_route_label(profile, carrier)}\u2069"
+            # The row already shows latency in its badge; repeating it in the
+            # detail line just made the line longer than the column.
+            endpoint = f"\u2066{self._profile_route_label(profile, carrier, include_ping=False)}\u2069"
             item_text = f"{recommendation}{profile.name}\n{endpoint}"
             item = QListWidgetItem(item_text); item.setData(Qt.UserRole, profile.id)
             item.setSizeHint(QSize(
@@ -4938,7 +5034,7 @@ class MainWindow(QMainWindow):
             item_icon = (
                 country_flag_icon(profile.country_code, 30, 20)
                 if profile.route_is_verified else
-                cyber_icon("file-cog" if profile.origin == "user" else "server", "#A855F7" if profile.id == self.storage.selected_id else "#6f91b5", 20)
+                cyber_icon("file-cog" if profile.origin == "user" else "server", ICON_ACCENT if profile.id == self.storage.selected_id else "#6f91b5", 20)
             )
             item.setIcon(item_icon)
             if recommendation:
@@ -6141,7 +6237,16 @@ class MainWindow(QMainWindow):
         }
         fa_status, en_status, fa_hint, en_hint, fa_button, en_button, icon_name, button_state, enabled = states[state]
         self.status.setText(self.tr(fa_status, en_status)); self.connection_hint.setText(self.tr(fa_hint, en_hint)); self.connect_button.setText(self.tr(fa_button, en_button)); self.connect_button.setEnabled(enabled)
-        self.connect_button.setProperty("state", button_state); self.connect_button.setIcon(cyber_icon(icon_name, "#031422" if state == "disconnected" else "#eaffff", 20)); _restyle(self.connect_button)
+        # The glyph matches the label colour the stylesheet gives this state,
+        # so it never sits on the button as a differently-tinted white.
+        icon_color = {
+            "idle": ICON_ON_ACCENT,
+            "connected": ICON_SUCCESS,
+            "cancel": COLOR_TOKENS["warning"],
+            "error": ICON_DANGER,
+            "loading": COLOR_TOKENS["accenthi"],
+        }.get(button_state, ICON_ON_ACCENT)
+        self.connect_button.setProperty("state", button_state); self.connect_button.setIcon(cyber_icon(icon_name, icon_color, 20)); _restyle(self.connect_button)
         visual_state = "connecting" if state == "disconnecting" else state
         self.status_pill.set_state(visual_state); self.orb.set_state(visual_state)
         self.status.setObjectName("heroStatusOn" if state == "connected" else "heroStatusError" if state == "error" else "heroStatus")
@@ -6313,11 +6418,11 @@ class MainWindow(QMainWindow):
         self.log_count_label.setText(self.tr(f"{count} خط", f"{count} line{'s' if count != 1 else ''}"))
 
     def _append_log_line(self, line):
-        lowered = line.lower(); color = "#c7d8e8"
-        if any(word in lowered for word in ("error", "fail", "exception", "fatal")): color = "#ff7891"
-        elif any(word in lowered for word in ("warn", "timeout", "cancel")): color = "#ffd166"
-        elif any(word in lowered for word in ("connected", "success", " win ", "completed", "verified", "=> ok")): color = "#55efae"
-        elif any(word in lowered for word in ("probe", "config try", "sni", "xray")): color = "#75d9ff"
+        lowered = line.lower(); color = COLOR_TOKENS["textdim"]
+        if any(word in lowered for word in ("error", "fail", "exception", "fatal")): color = COLOR_TOKENS["danger"]
+        elif any(word in lowered for word in ("warn", "timeout", "cancel")): color = COLOR_TOKENS["warning"]
+        elif any(word in lowered for word in ("connected", "success", " win ", "completed", "verified", "=> ok")): color = COLOR_TOKENS["success"]
+        elif any(word in lowered for word in ("probe", "config try", "sni", "xray")): color = COLOR_TOKENS["accenthi"]
         cursor = self.logs.textCursor(); cursor.movePosition(QTextCursor.End); fmt = QTextCharFormat(); fmt.setForeground(QColor(color)); cursor.insertText(line + "\n", fmt)
         if self.log_autoscroll.isChecked(): self.logs.setTextCursor(cursor); self.logs.ensureCursorVisible()
 
@@ -6452,13 +6557,13 @@ class MainWindow(QMainWindow):
         banner.setFixedHeight(108)
         root = QHBoxLayout(banner); root.setContentsMargins(13, 11, 13, 11); root.setSpacing(12)
         accent = QFrame(); accent.setObjectName("updateNotificationAccent"); accent.setFixedSize(4, 70); root.addWidget(accent, 0, Qt.AlignVCenter)
-        icon = QLabel(); icon.setObjectName("updateNotificationIcon"); icon.setFixedSize(56, 56); icon.setAlignment(Qt.AlignCenter); icon.setPixmap(cyber_pixmap("download", "#bafff7", 28)); root.addWidget(icon, 0, Qt.AlignVCenter)
+        icon = QLabel(); icon.setObjectName("updateNotificationIcon"); icon.setFixedSize(56, 56); icon.setAlignment(Qt.AlignCenter); icon.setPixmap(cyber_pixmap("download", ICON_DIM, 28)); root.addWidget(icon, 0, Qt.AlignVCenter)
         copy = QVBoxLayout(); copy.setSpacing(2)
         eyebrow = QLabel(self.tr("بروزرسانی جدید کیوب‌وی‌پی‌ان", "CUBEVPN UPDATE")); eyebrow.setObjectName("updateNotificationEyebrow")
         title = QLabel(self.tr("نسخه جدید آماده دریافت است", "A new version is ready")); title.setObjectName("updateNotificationTitle")
         detail = QLabel(self.tr(f"نسخه نصب‌شده {ltr_isolate(info.current_version)}  ←  نسخه جدید {ltr_isolate(info.latest_version)}", f"Installed {info.current_version}  →  New {info.latest_version}")); detail.setObjectName("updateNotificationDetail"); detail.setWordWrap(True)
         copy.addWidget(eyebrow); copy.addWidget(title); copy.addWidget(detail); root.addLayout(copy, 1)
-        download = QPushButton(self.tr("دریافت بروزرسانی", "Download Update")); download.setObjectName("updateNotificationPrimary"); download.setIcon(cyber_icon("download", "#031422", 18)); download.setIconSize(QSize(18, 18)); download.setCursor(Qt.PointingHandCursor); download.setFixedSize(176, 40)
+        download = QPushButton(self.tr("دریافت بروزرسانی", "Download Update")); download.setObjectName("updateNotificationPrimary"); download.setIcon(cyber_icon("download", ICON_ON_ACCENT, 18)); download.setIconSize(QSize(18, 18)); download.setCursor(Qt.PointingHandCursor); download.setFixedSize(176, 40)
         download.clicked.connect(self._open_latest_update); download.clicked.connect(self._dismiss_update_notification); root.addWidget(download, 0, Qt.AlignVCenter)
         available_width = max(620, self.stack.width() - 36)
         banner.setFixedWidth(min(820, available_width))
@@ -6603,7 +6708,7 @@ class MainWindow(QMainWindow):
         names = [name for name in names if str(name).lower() not in protected]
         selected = set(self.storage.settings.get("bypass_processes", [])); self.process_table.setRowCount(len(names))
         for row, name in enumerate(names):
-            toggle = ToggleSwitch(); toggle.setAccessibleName(f"Bypass VPN for {name}"); toggle.setChecked(name in selected); toggle.stateChanged.connect(self._save_process_selection); self.process_table.setCellWidget(row, 0, toggle); item = QTableWidgetItem(name); item.setIcon(cyber_icon("network", "#6689ad", 17)); item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter); self.process_table.setItem(row, 1, item)
+            toggle = ToggleSwitch(); toggle.setAccessibleName(f"Bypass VPN for {name}"); toggle.setChecked(name in selected); toggle.stateChanged.connect(self._save_process_selection); self.process_table.setCellWidget(row, 0, toggle); item = QTableWidgetItem(name); item.setIcon(cyber_icon("network", ICON_MUTED, 17)); item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter); self.process_table.setItem(row, 1, item)
         self.process_refresh_btn.setEnabled(True); self._filter_processes(); self._update_process_count(); self._set_activity("فهرست پردازه‌ها به‌روزرسانی شد.", "Process list refreshed.", "success", False)
 
     def _filter_processes(self, *_):
@@ -6723,322 +6828,366 @@ class MainWindow(QMainWindow):
         event.accept()
 
 
-COLOR_TOKENS = {
-    "background": "#0D0619", "bgsoft": "#120a24", "surface": "#170f2e",
-    "surface2": "#1d1339", "border": "rgba(168, 85, 247, 0.22)",
-    "borderstrong": "rgba(168, 85, 247, 0.55)", "accent": "#A855F7",
-    "accent2": "#C026D3", "purple": "#6D28D9", "success": "#23f5a6",
-    "warning": "#ffd166", "danger": "#ff5c7c", "muted": "#b2a3d8",
-    "text": "#f4f8ff", "checkicon": str(ASSETS / "ui" / "check.svg").replace("\\", "/"),
-    "chevronicon": str(ASSETS / "ui" / "chevron-down.svg").replace("\\", "/"),
-}
 
 STYLE = """
+/* ---------------------------------------------------------------- base --- */
+/* Vazirmatn ships Regular + Bold only, so the sheet uses 400 and 700 and
+   leans on size and colour for the rest of the hierarchy. A 650/850/880
+   ladder rendered identically to 700 and only made the sheet harder to read. */
 * { font-family: "Vazirmatn", "Segoe UI"; font-size: 13px; color: $text; outline: 0; }
 QWidget { background: transparent; }
-QMainWindow, QWidget#windowRoot { background: $background; }
+QMainWindow, QWidget#windowRoot { background: $canvas; }
 QWidget#page, QWidget#pageBody, QStackedWidget#content, QFrame#contentShell, QFrame#activityWrap { background: transparent; }
 QScrollArea#pageScroll, QScrollArea#pageScroll > QWidget, QScrollArea#pageScroll > QWidget > QWidget { background: transparent; border: 0; }
-*[technical="true"] { font-family: "Cascadia Mono", "Segoe UI", "Consolas"; }
-QToolTip { background: #102441; color: #f5eaff; border: 1px solid #5f3289; border-radius: 8px; padding: 7px 10px; }
-QToolButton#helpDot { background: rgba(16,52,80,0.88); color: #bb78fa; border: 1px solid rgba(168,85,247,0.36); border-radius: 12px; font-size: 13px; font-weight: 900; padding: 0; }
-QToolButton#helpDot:hover, QToolButton#helpDot:focus { background: rgba(67,22,110,0.95); color: #ffffff; border-color: #8f23f5; }
+*[technical="true"] { font-family: "Cascadia Mono", "Consolas", "Segoe UI"; }
+QLabel#muted { color: $textdim; }
 
-QFrame#sidebar { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 rgba(7,23,42,248),stop:0.5 rgba(5,17,34,250),stop:1 rgba(5,12,27,252)); border-right: 1px solid $border; }
-QFrame#sidebar[rtl="true"] { border-right: 0; border-left: 1px solid $border; }
-QFrame#logoCard { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(36,13,58,235),stop:1 rgba(8,27,48,225)); border: 1px solid rgba(143,35,245,0.25); border-radius: 20px; }
-QLabel#logoMark { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 $accent,stop:1 $accent2); border: 1px solid rgba(231,205,255,0.8); border-radius: 16px; qproperty-alignment: AlignCenter; }
-QLabel#brand { font-size: 17px; font-weight: 900; color: #fbf7ff; }
-QLabel#version { color: #a759f0; font-size: 10px; font-weight: 800; letter-spacing: 1.5px; }
-QPushButton#navButton { text-align: left; background: transparent; border: 1px solid transparent; border-radius: 14px; padding: 12px 29px 12px 16px; color: #b3c5dc; font-size: 14px; font-weight: 650; }
-QPushButton#navButton[rtl="true"] { text-align: left; padding: 12px 16px 12px 29px; }
-QPushButton#navButton:hover { background: rgba(18,50,76,0.72); border-color: rgba(168,85,247,0.18); color: #fbf7ff; }
-QPushButton#navButton:focus { border-color: $borderstrong; }
-QPushButton#navButton:pressed { background: rgba(51,16,83,0.82); }
-QPushButton#navButton:checked { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 rgba(60,6,111,0.74),stop:0.55 rgba(54,11,95,0.78),stop:1 rgba(19,43,73,0.72)); color: #ecd8ff; border: 1px solid rgba(143,35,245,0.45); border-left: 3px solid $accent; font-weight: 850; }
-QPushButton#navButton[rtl="true"]:checked { border-left: 1px solid rgba(143,35,245,0.45); border-right: 3px solid $accent; }
-QFrame#sidebarFooter { background: rgba(7,24,45,0.82); border: 1px solid rgba(168,85,247,0.18); border-radius: 15px; }
-QPushButton#footerAction { background: transparent; border: 1px solid transparent; border-radius: 10px; padding: 9px 11px; color: #b3c7dc; text-align: left; font-weight: 600; }
+QToolTip { background: $surfacehi; color: $text; border: 1px solid $line; border-radius: 8px; padding: 7px 10px; }
+QToolButton#helpDot { background: $surfacehi; color: $textdim; border: 1px solid $line; border-radius: 12px; font-size: 12px; font-weight: 700; padding: 0; }
+QToolButton#helpDot:hover, QToolButton#helpDot:focus { background: $accentsoft; color: $accenthi; border-color: $accentline; }
+
+/* ------------------------------------------------------------- sidebar --- */
+QFrame#sidebar { background: $canvassoft; border-right: 1px solid $line; }
+QFrame#sidebar[rtl="true"] { border-right: 0; border-left: 1px solid $line; }
+QFrame#logoCard { background: $surface; border: 1px solid $line; border-radius: 18px; }
+QLabel#logoMark { background: $accent; border: 0; border-radius: 14px; qproperty-alignment: AlignCenter; }
+QLabel#brand { font-size: 17px; font-weight: 700; color: $text; }
+QLabel#version { color: $muted; font-size: 10px; font-weight: 700; letter-spacing: 1.4px; }
+
+QPushButton#navButton { text-align: left; background: transparent; border: 1px solid transparent; border-radius: 12px; padding: 12px 30px 12px 16px; color: $textdim; font-size: 14px; font-weight: 400; }
+QPushButton#navButton[rtl="true"] { text-align: left; padding: 12px 16px 12px 30px; }
+QPushButton#navButton:hover { background: $surface; color: $text; }
+QPushButton#navButton:focus { border-color: $accentline; }
+QPushButton#navButton:pressed { background: $surfacein; }
+QPushButton#navButton:checked { background: $accentsoft; color: $text; border: 1px solid $accentline; font-weight: 700; }
+
+QFrame#sidebarFooter { background: transparent; border: 1px solid $line; border-radius: 14px; }
+QPushButton#footerAction { background: transparent; border: 1px solid transparent; border-radius: 9px; padding: 9px 11px; color: $textdim; text-align: left; font-weight: 400; }
 QPushButton#footerAction[rtl="true"] { text-align: right; }
 QPushButton#footerAction[rtl="false"] { text-align: left; }
-QPushButton#footerAction:hover { background: rgba(19,53,79,0.8); border-color: rgba(168,85,247,0.18); color: #b878f4; }
-QFrame#ratingCard { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(17,26,71,0.9),stop:1 rgba(43,17,91,0.74)); border: 1px solid rgba(124,60,255,0.48); border-radius: 17px; }
-QLabel#ratingTitle { font-size: 14px; font-weight: 850; color: #f7f4ff; }
-QLabel#ratingText { font-size: 11px; color: #b7addc; }
-QPushButton#ratingButton { min-height: 30px; background: rgba(76,42,146,0.34); border: 1px solid rgba(158,115,255,0.42); color: #e5dbff; padding: 5px 9px; }
-QPushButton#ratingButton:hover { background: rgba(106,57,200,0.52); border-color: #a88aff; }
+QPushButton#footerAction:hover { background: $surface; color: $text; }
 
-QFrame#pageHeader { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(10,30,57,0.92),stop:0.52 rgba(7,24,47,0.86),stop:1 rgba(17,26,63,0.84)); border: 1px solid rgba(168,85,247,0.22); border-radius: 21px; }
-QLabel#pageHeaderIcon { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(62,18,103,0.76),stop:1 rgba(17,45,83,0.88)); border: 1px solid rgba(168,81,249,0.38); border-radius: 17px; qproperty-alignment: AlignCenter; }
-QLabel#pageEyebrow { color: #b16eef; font-size: 9px; font-weight: 900; letter-spacing: 1.8px; }
-QLabel#pageTitle { font-size: 29px; font-weight: 900; color: #f8fcff; }
-QLabel#pageSubtitle { color: #b3c7df; font-size: 13px; font-weight: 520; }
-QLabel#summaryPill { min-height: 24px; min-width: 92px; padding: 6px 12px; color: #e5c9ff; background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 rgba(39,7,68,0.86),stop:1 rgba(15,38,76,0.88)); border: 1px solid rgba(152,64,235,0.34); border-radius: 12px; font-size: 11px; font-weight: 800; }
-QFrame#statusPill { background: rgba(7,22,44,0.86); border: 1px solid rgba(168,85,247,0.22); border-radius: 16px; }
-QFrame#statusPill[state="connected"] { border-color: rgba(35,245,166,0.46); background: rgba(28,7,47,0.76); }
-QFrame#statusPill[state="connecting"] { border-color: rgba(255,209,102,0.45); }
-QFrame#statusPill[state="error"] { border-color: rgba(255,92,124,0.55); background: rgba(55,14,37,0.66); }
-QLabel#statusPillText { color: #d4e2f5; font-size: 12px; font-weight: 700; }
+QFrame#ratingCard { background: $surface; border: 1px solid $line; border-radius: 14px; }
+QLabel#ratingTitle { font-size: 14px; font-weight: 700; color: $text; }
+QLabel#ratingText { font-size: 11px; color: $muted; }
+QPushButton#ratingButton { min-height: 32px; background: $accentsoft; border: 1px solid $accentline; color: $accenthi; padding: 5px 9px; font-weight: 700; }
+QPushButton#ratingButton:hover { background: $accentsofthi; border-color: $accentlinehi; color: $text; }
 
-QFrame#heroCard { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(8,25,55,0.96),stop:0.55 rgba(6,28,59,0.92),stop:1 rgba(41,7,72,0.9)); border: 1px solid rgba(168,85,247,0.46); border-radius: 26px; }
-QFrame#orbShell { background: rgba(5,22,43,0.54); border: 1px solid rgba(168,85,247,0.15); border-radius: 30px; }
-QLabel#orbCaption { color: #976ebd; font-size: 9px; font-weight: 850; letter-spacing: 2.4px; }
-QLabel#heroBadge, QLabel#sectionEyebrow { color: $accent; font-size: 10px; font-weight: 900; letter-spacing: 1.8px; }
-QLabel#heroStatus, QLabel#heroStatusOn, QLabel#heroStatusError { color: #f8fbff; font-size: 38px; font-weight: 900; }
-QLabel#heroStatusOn { color: #e8cfff; }
-QLabel#heroStatusError { color: #ffd9e2; }
-QLabel#heroHint { color: #adc0dc; font-size: 15px; }
+/* --------------------------------------------------------- page header --- */
+QFrame#pageHeader { background: $surface; border: 1px solid $line; border-radius: 18px; }
+QLabel#pageHeaderIcon { background: $accentsoft; border: 1px solid $accentline; border-radius: 14px; qproperty-alignment: AlignCenter; }
+QLabel#pageEyebrow { color: $muted; font-size: 10px; font-weight: 700; letter-spacing: 1.6px; }
+QLabel#pageTitle { font-size: 26px; font-weight: 700; color: $text; }
+QLabel#pageSubtitle { color: $textdim; font-size: 13px; }
+QLabel#summaryPill { min-height: 24px; min-width: 92px; padding: 6px 12px; color: $textdim; background: $surfacehi; border: 1px solid $line; border-radius: 10px; font-size: 11px; font-weight: 700; }
 
-QFrame#countrySelectorCard { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 rgba(38,7,67,0.92),stop:0.48 rgba(8,31,61,0.94),stop:1 rgba(26,24,72,0.91)); border: 1px solid rgba(155,65,240,0.38); border-radius: 20px; }
-QFrame#countrySelectorCard:hover { border-color: rgba(176,91,255,0.68); background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 rgba(44,8,77,0.95),stop:0.48 rgba(9,38,70,0.96),stop:1 rgba(33,29,86,0.94)); }
-QFrame#countrySelectorCard[mode="manual"] { border-color: rgba(111,145,181,0.3); background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 rgba(13,34,52,0.9),stop:1 rgba(25,25,58,0.9)); }
-QLabel#countryIcon { background: qradialgradient(cx:0.42,cy:0.35,radius:0.8,stop:0 rgba(136,45,222,0.4),stop:1 rgba(48,11,83,0.78)); border: 1px solid rgba(182,105,255,0.42); border-radius: 16px; }
-QLabel#countryEyebrow { color: #ab63ee; font-size: 9px; font-weight: 900; letter-spacing: 1.5px; }
-QLabel#countryTitle { color: #faf5ff; font-size: 17px; font-weight: 900; }
-QLabel#countryDescription { color: #a9bfd7; font-size: 11px; }
-QLabel#countryCount { color: #d09ffd; background: rgba(44,8,78,0.56); border: 1px solid rgba(157,72,236,0.25); border-radius: 9px; padding: 4px 9px; font-size: 10px; font-weight: 800; }
-QComboBox#countryCombo { background: rgba(4,20,43,0.96); border: 1px solid rgba(166,82,244,0.55); border-radius: 13px; padding: 7px 15px; color: #faf4ff; font-size: 13px; font-weight: 750; }
-QComboBox#countryCombo:hover, QComboBox#countryCombo:focus { border-color: #b667ff; background: rgba(6,34,55,0.98); }
-QComboBox#countryCombo:disabled { color: #7890aa; border-color: rgba(111,145,181,0.28); background: rgba(8,20,38,0.72); }
-QComboBox#countryCombo QAbstractItemView { min-width: 350px; background: #091c35; border: 1px solid rgba(166,82,244,0.6); border-radius: 12px; padding: 7px; outline: 0; show-decoration-selected: 1; }
-QComboBox#countryCombo QAbstractItemView::item { min-height: 38px; padding: 6px 12px; margin: 2px; border-radius: 8px; color: #f5eaff; }
-QComboBox#countryCombo QAbstractItemView::item:hover { background: rgba(63,22,102,0.86); }
-QComboBox#countryCombo QAbstractItemView::item:selected { background: rgba(64,14,111,0.92); color: #ffffff; }
+QFrame#statusPill { background: $surfacehi; border: 1px solid $line; border-radius: 10px; }
+QFrame#statusPill[state="connected"] { border-color: $successline; background: $successsoft; }
+QFrame#statusPill[state="connecting"] { border-color: $warningline; background: $warningsoft; }
+QFrame#statusPill[state="error"] { border-color: $dangerline; background: $dangersoft; }
+QLabel#statusPillText { background: transparent; color: $textdim; font-size: 12px; font-weight: 700; }
+QFrame#statusPill[state="connected"] QLabel#statusPillText { color: $success; }
+QFrame#statusPill[state="connecting"] QLabel#statusPillText { color: $warning; }
+QFrame#statusPill[state="error"] QLabel#statusPillText { color: $danger; }
 
-QFrame#metricCard { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(10,29,60,0.94),stop:1 rgba(8,21,44,0.92)); border: 1px solid rgba(168,85,247,0.24); border-radius: 19px; }
-QFrame#metricCard:hover { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(12,39,72,0.96),stop:1 rgba(8,29,53,0.94)); border-color: rgba(168,85,247,0.58); }
-QLabel#metricIcon { background: rgba(44,10,76,0.72); border: 1px solid rgba(143,35,245,0.26); border-radius: 10px; qproperty-alignment: AlignCenter; }
-QLabel#metricLabel, QLabel#fieldLabel { color: #a9bdd7; font-size: 11px; font-weight: 750; }
-QLabel#metricValue { color: #f7fbff; font-size: 22px; font-weight: 850; }
-QLabel#metricSecondary { color: #a055e7; font-family: "Cascadia Mono", "Segoe UI", "Consolas"; font-size: 11px; font-weight: 650; }
-QFrame#quickControls, QFrame#sniActionBar { background: rgba(9,25,54,0.86); border: 1px solid rgba(168,85,247,0.24); border-radius: 18px; }
-QFrame#toggleOption, QFrame#proxyModeOption, QFrame#tunModeOption, QFrame#gatewayModeOption, QFrame#carrierControl { background: rgba(8,24,47,0.74); border: 1px solid rgba(168,85,247,0.13); border-radius: 12px; }
-QFrame#toggleOption:hover, QFrame#proxyModeOption:hover, QFrame#tunModeOption:hover, QFrame#gatewayModeOption:hover, QFrame#carrierControl:hover { border-color: rgba(168,85,247,0.35); background: rgba(12,36,61,0.82); }
-QFrame#proxyModeOption[active="true"] { border-color: rgba(143,35,245,0.38); background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 rgba(37,8,64,0.84),stop:1 rgba(10,35,63,0.82)); }
-QFrame#proxyModeOption[active="false"] { border-color: rgba(111,145,181,0.24); background: rgba(8,21,40,0.72); }
-QFrame#tunModeOption[active="true"] { border-color: rgba(179,97,255,0.62); background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 rgba(44,8,78,0.92),stop:1 rgba(28,39,91,0.88)); }
-QFrame#tunModeOption[active="false"] { border-color: rgba(111,145,181,0.24); background: rgba(8,21,40,0.72); }
-QFrame#gatewayModeOption[state="requested"], QFrame#gatewayModeOption[state="starting"] { border-color: rgba(255,209,102,0.64); background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 rgba(74,56,24,0.9),stop:1 rgba(16,46,68,0.9)); }
-QFrame#gatewayModeOption[state="stopping"] { border-color: rgba(255,118,145,0.58); background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 rgba(69,26,48,0.9),stop:1 rgba(16,39,65,0.9)); }
-QFrame#gatewayModeOption[state="active"] { border-color: rgba(181,102,255,0.78); background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 rgba(44,8,78,0.94),stop:0.55 rgba(46,11,78,0.94),stop:1 rgba(55,35,104,0.92)); }
-QFrame#gatewayModeOption[state="off"] { border-color: rgba(111,145,181,0.24); background: rgba(8,21,40,0.72); }
-QToolButton#gatewayDevicesBadge { min-width: 48px; max-width: 76px; min-height: 24px; max-height: 24px; padding: 0 8px; color: #a9bdd4; background: #0a2038; border: 1px solid rgba(91,143,183,0.48); border-radius: 10px; font-size: 10px; font-weight: 850; }
-QToolButton#gatewayDevicesBadge:hover, QToolButton#gatewayDevicesBadge:focus { color: #f9f2ff; background: rgba(45,12,75,0.94); border-color: rgba(176,91,255,0.76); }
-QToolButton#gatewayDevicesBadge[gatewayActive="true"] { color: #f0dfff; border-color: rgba(143,35,245,0.54); background: rgba(40,7,71,0.86); }
-QToolButton#gatewayDevicesBadge[hasDevices="true"] { color: #edfff8; border-color: rgba(35,245,166,0.72); background: rgba(43,6,78,0.92); }
-QFrame#gatewayDevicesPopup { background-color: #081b33; border: 1px solid #65279f; border-radius: 17px; }
-QLabel#gatewayPopupIcon { background: rgba(48,11,82,0.76); border: 1px solid rgba(162,73,246,0.38); border-radius: 11px; }
-QLabel#gatewayPopupTitle { color: #faf5ff; font-size: 14px; font-weight: 900; }
-QLabel#gatewayPopupSubtitle { color: #87a8c5; font-size: 10px; font-weight: 600; }
-QLabel#gatewayPopupCount { color: #d6aaff; background: rgba(39,7,69,0.66); border: 1px solid rgba(143,35,245,0.3); border-radius: 9px; padding: 4px 8px; font-size: 10px; font-weight: 850; }
-QScrollArea#gatewayDevicesScroll, QScrollArea#gatewayDevicesScroll > QWidget, QWidget#gatewayDevicesList { background: transparent; border: 0; }
-QFrame#gatewayDeviceRow { background: rgba(8,30,54,0.88); border: 1px solid rgba(132,69,190,0.3); border-radius: 11px; }
-QFrame#gatewayDeviceRow:hover { background: rgba(38,10,65,0.94); border-color: rgba(143,35,245,0.5); }
-QLabel#gatewayDeviceCheck { background: rgba(45,9,78,0.48); border: 1px solid rgba(35,245,166,0.34); border-radius: 9px; }
-QLabel#gatewayDeviceIp { color: #f9f2ff; font-size: 12px; font-weight: 800; }
-QLabel#gatewayDeviceMac { color: #7999b9; font-size: 9px; font-weight: 600; }
-QLabel#gatewayDeviceState { color: #55f5b4; font-size: 10px; font-weight: 850; }
-QFrame#gatewayDeviceEmpty { background: rgba(7,21,42,0.62); border: 1px dashed rgba(86,137,177,0.35); border-radius: 12px; }
-QLabel#gatewayDeviceEmptyText { color: #8da6bf; font-size: 11px; font-weight: 650; }
-QLabel#controlLabel { color: #d3e0ee; font-size: 12px; font-weight: 650; }
+/* ---------------------------------------------------------------- hero --- */
+/* The one place a gradient earns its keep: it is the focal point of the app,
+   and the ramp stays inside a single hue instead of crossing blue to magenta. */
+QFrame#heroCard { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 $herotop,stop:1 $herobottom); border: 1px solid $line; border-radius: 20px; }
+/* The orb is the artwork; boxing it inside a second bordered panel just put a
+   frame around a frame. It now floats directly on the hero. */
+QFrame#orbShell { background: transparent; border: 0; }
+QLabel#orbCaption { color: $faint; font-size: 9px; font-weight: 700; letter-spacing: 2.2px; }
+QLabel#heroBadge, QLabel#sectionEyebrow { color: $muted; font-size: 10px; font-weight: 700; letter-spacing: 1.6px; }
+QLabel#heroStatus, QLabel#heroStatusOn, QLabel#heroStatusError { color: $text; font-size: 38px; font-weight: 700; }
+QLabel#heroStatusOn { color: $success; }
+QLabel#heroStatusError { color: $danger; }
+QLabel#heroHint { color: $textdim; font-size: 15px; }
+
+/* ------------------------------------------------------ country picker --- */
+QFrame#countrySelectorCard { background: $surface; border: 1px solid $line; border-radius: 16px; }
+QFrame#countrySelectorCard:hover { border-color: $linehi; }
+QFrame#countrySelectorCard[mode="manual"] { background: $surfacein; }
+QLabel#countryIcon { background: $accentsoft; border: 1px solid $accentline; border-radius: 13px; }
+QLabel#countryEyebrow { color: $muted; font-size: 10px; font-weight: 700; letter-spacing: 1.4px; }
+QLabel#countryTitle { color: $text; font-size: 17px; font-weight: 700; }
+QLabel#countryDescription { color: $textdim; font-size: 11px; }
+QLabel#countryCount { color: $textdim; background: $surfacehi; border: 1px solid $line; border-radius: 8px; padding: 4px 9px; font-size: 10px; font-weight: 700; }
+
+QComboBox#countryCombo { background: $surfacein; border: 1px solid $line; border-radius: 10px; padding: 7px 15px; color: $text; font-size: 13px; font-weight: 700; }
+QComboBox#countryCombo:hover { border-color: $linehi; }
+QComboBox#countryCombo:focus { border-color: $accent; }
+QComboBox#countryCombo:disabled { color: $faint; border-color: $line; background: $canvassoft; }
+QComboBox#countryCombo QAbstractItemView { min-width: 350px; background: $surfacehi; border: 1px solid $line; border-radius: 10px; padding: 6px; outline: 0; show-decoration-selected: 1; }
+QComboBox#countryCombo QAbstractItemView::item { min-height: 36px; padding: 6px 12px; margin: 1px; border-radius: 7px; color: $text; }
+QComboBox#countryCombo QAbstractItemView::item:hover { background: $surface; }
+QComboBox#countryCombo QAbstractItemView::item:selected { background: $accentsofthi; color: $text; }
+
+/* --------------------------------------------------------- metric grid --- */
+QFrame#metricCard { background: $surface; border: 1px solid $line; border-radius: 16px; }
+QFrame#metricCard:hover { background: $surfacehi; border-color: $linehi; }
+QLabel#metricIcon { background: $accentsoft; border: 1px solid $accentline; border-radius: 10px; qproperty-alignment: AlignCenter; }
+QLabel#metricLabel, QLabel#fieldLabel { color: $muted; font-size: 11px; font-weight: 700; letter-spacing: 0.4px; }
+QLabel#metricValue { color: $text; font-size: 22px; font-weight: 700; }
+QLabel#metricSecondary { color: $muted; font-family: "Cascadia Mono", "Consolas", "Segoe UI"; font-size: 11px; }
+
+/* ------------------------------------------------------ quick controls --- */
+QFrame#quickControls { background: $surface; border: 1px solid $line; border-radius: 16px; }
+QFrame#toggleOption, QFrame#proxyModeOption, QFrame#tunModeOption, QFrame#gatewayModeOption, QFrame#carrierControl { background: $surfacein; border: 1px solid $line; border-radius: 10px; }
+QFrame#toggleOption:hover, QFrame#proxyModeOption:hover, QFrame#tunModeOption:hover, QFrame#gatewayModeOption:hover, QFrame#carrierControl:hover { border-color: $linehi; background: $surfacehi; }
+QFrame#proxyModeOption[active="true"], QFrame#tunModeOption[active="true"] { border-color: $accentline; background: $accentsoft; }
+QFrame#proxyModeOption[active="false"], QFrame#tunModeOption[active="false"] { border-color: $line; background: $surfacein; }
+QFrame#gatewayModeOption[state="active"] { border-color: $accentline; background: $accentsoft; }
+QFrame#gatewayModeOption[state="requested"], QFrame#gatewayModeOption[state="starting"] { border-color: $warningline; background: $warningsoft; }
+QFrame#gatewayModeOption[state="stopping"] { border-color: $dangerline; background: $dangersoft; }
+QFrame#gatewayModeOption[state="off"] { border-color: $line; background: $surfacein; }
+QLabel#controlLabel { color: $text; font-size: 12px; }
 QCheckBox#toggleSwitch { background: transparent; border: 0; padding: 0; }
 
-QFrame#activityBar { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 rgba(8,26,53,0.96),stop:0.7 rgba(8,30,55,0.94),stop:1 rgba(10,37,66,0.92)); border: 1px solid rgba(168,85,247,0.25); border-radius: 15px; }
-QFrame#activityBar[state="success"] { border-color: rgba(35,245,166,0.36); }
-QFrame#activityBar[state="warning"] { border-color: rgba(255,209,102,0.42); }
-QFrame#activityBar[state="error"] { border-color: rgba(255,92,124,0.52); }
-QLabel#activityTitle { color: #a761e9; font-size: 9px; font-weight: 900; letter-spacing: 1.5px; }
-QLabel#activityMessage { color: #d9e7f5; font-size: 12px; font-weight: 600; }
+/* ------------------------------------------------------------- gateway --- */
+QToolButton#gatewayDevicesBadge { min-width: 48px; max-width: 76px; min-height: 24px; max-height: 24px; padding: 0 8px; color: $muted; background: $surfacehi; border: 1px solid $line; border-radius: 8px; font-size: 10px; font-weight: 700; }
+QToolButton#gatewayDevicesBadge:hover, QToolButton#gatewayDevicesBadge:focus { color: $text; background: $accentsoft; border-color: $accentline; }
+QToolButton#gatewayDevicesBadge[gatewayActive="true"] { color: $accenthi; border-color: $accentline; background: $accentsoft; }
+QToolButton#gatewayDevicesBadge[hasDevices="true"] { color: $success; border-color: $successline; background: $successsoft; }
 
-QPushButton { min-height: 38px; background: rgba(17,43,76,0.9); border: 1px solid rgba(82,134,178,0.52); border-radius: 11px; padding: 8px 14px; color: #eaf4ff; font-weight: 700; }
-QPushButton:hover { background: rgba(24,59,95,0.96); border-color: rgba(143,35,245,0.72); color: #ffffff; }
-QPushButton:focus { border: 1px solid $accent; }
-QPushButton:pressed { background: rgba(57,10,101,0.92); padding-top: 9px; padding-bottom: 7px; }
-QPushButton:disabled { background: rgba(9,20,37,0.78); border-color: rgba(65,91,121,0.34); color: #536b86; }
-QPushButton#connectButton, QPushButton#primaryButton, QPushButton#scanPrimaryButton, QPushButton#primaryAction, QPushButton#modalPrimary { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 $accent,stop:1 $accent2); border: 1px solid rgba(228,199,255,0.86); color: #031422; font-size: 14px; font-weight: 900; }
-QPushButton#primaryButton:disabled, QPushButton#scanPrimaryButton:disabled, QPushButton#primaryAction:disabled, QPushButton#modalPrimary:disabled { background: rgba(9,20,37,0.82); border-color: rgba(65,91,121,0.34); color: #536b86; }
-QPushButton#connectButton { border-radius: 15px; font-size: 17px; }
-QPushButton#connectButton:hover, QPushButton#scanPrimaryButton:hover, QPushButton#primaryAction:hover, QPushButton#modalPrimary:hover { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #b05ffb,stop:1 #b361ff); border-color: #f1e3ff; }
-QPushButton#connectButton[state="connected"] { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #4c0c87,stop:1 #6812b9); color: #f7efff; }
-QPushButton#connectButton[state="cancel"] { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #82502f,stop:1 #9f3150); border-color: #ffc56f; color: #fffaf2; }
-QPushButton#connectButton[state="cancel"]:hover { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #9c6037,stop:1 #bd3b60); border-color: #ffe1a3; color: #ffffff; }
-QPushButton#connectButton[state="loading"]:disabled { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #4a2968,stop:1 #4a1e74); border-color: #794da3; color: #ebd5ff; }
-QPushButton#connectButton[state="error"] { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #7f2944,stop:1 #a82f55); border-color: #ff7891; color: #fff5f7; }
-QPushButton#secondaryAction, QPushButton#modalSecondary, QPushButton#advancedButton { background: rgba(13,35,64,0.94); border-color: rgba(88,135,183,0.54); }
+QFrame#gatewayDevicesPopup { background-color: $surface; border: 1px solid $linehi; border-radius: 16px; }
+QLabel#gatewayPopupIcon { background: $accentsoft; border: 1px solid $accentline; border-radius: 10px; }
+QLabel#gatewayPopupTitle { color: $text; font-size: 14px; font-weight: 700; }
+QLabel#gatewayPopupSubtitle { color: $muted; font-size: 10px; }
+QLabel#gatewayPopupCount { color: $textdim; background: $surfacehi; border: 1px solid $line; border-radius: 8px; padding: 4px 8px; font-size: 10px; font-weight: 700; }
+QScrollArea#gatewayDevicesScroll, QScrollArea#gatewayDevicesScroll > QWidget, QWidget#gatewayDevicesList { background: transparent; border: 0; }
+QFrame#gatewayDeviceRow { background: $surfacein; border: 1px solid $line; border-radius: 10px; }
+QFrame#gatewayDeviceRow:hover { background: $surfacehi; border-color: $linehi; }
+QLabel#gatewayDeviceCheck { background: $successsoft; border: 1px solid $successline; border-radius: 8px; }
+QLabel#gatewayDeviceIp { color: $text; font-size: 12px; font-weight: 700; }
+QLabel#gatewayDeviceMac { color: $muted; font-size: 9px; }
+QLabel#gatewayDeviceState { color: $success; font-size: 10px; font-weight: 700; }
+QFrame#gatewayDeviceEmpty { background: $surfacein; border: 1px dashed $line; border-radius: 10px; }
+QLabel#gatewayDeviceEmptyText { color: $muted; font-size: 11px; }
+
+/* --------------------------------------------------------- activity bar -- */
+QFrame#activityBar { background: $surface; border: 1px solid $line; border-radius: 14px; }
+QFrame#activityBar[state="success"] { border-color: $successline; }
+QFrame#activityBar[state="warning"] { border-color: $warningline; }
+QFrame#activityBar[state="error"] { border-color: $dangerline; }
+QLabel#activityTitle { color: $muted; font-size: 9px; font-weight: 700; letter-spacing: 1.4px; }
+QLabel#activityMessage { color: $textdim; font-size: 12px; }
+
+/* ------------------------------------------------------------- buttons --- */
+QPushButton { min-height: 38px; background: $surfacehi; border: 1px solid $line; border-radius: 10px; padding: 8px 14px; color: $text; font-weight: 700; }
+QPushButton:hover { background: $surface; border-color: $linehi; }
+QPushButton:focus { border-color: $accent; }
+QPushButton:pressed { background: $surfacein; }
+QPushButton:disabled { background: $canvassoft; border-color: $line; color: $faint; }
+
+QPushButton#connectButton, QPushButton#primaryAction, QPushButton#modalPrimary, QPushButton#trayChoiceButton { background: $accent; border: 1px solid $accent; color: $onaccent; font-size: 14px; font-weight: 700; }
+QPushButton#connectButton:hover, QPushButton#primaryAction:hover, QPushButton#modalPrimary:hover, QPushButton#trayChoiceButton:hover { background: $accenthi; border-color: $accenthi; }
+QPushButton#connectButton:pressed, QPushButton#primaryAction:pressed, QPushButton#modalPrimary:pressed, QPushButton#trayChoiceButton:pressed { background: $accentlo; border-color: $accentlo; }
+QPushButton#primaryAction:disabled, QPushButton#modalPrimary:disabled { background: $canvassoft; border-color: $line; color: $faint; }
+QPushButton#connectButton { min-height: 52px; border-radius: 13px; font-size: 17px; }
+QPushButton#connectButton[state="connected"] { background: $successsoft; border-color: $successline; color: $success; }
+QPushButton#connectButton[state="connected"]:hover { background: $success; border-color: $success; color: $onaccent; }
+QPushButton#connectButton[state="cancel"] { background: $warningsoft; border-color: $warningline; color: $warning; }
+QPushButton#connectButton[state="cancel"]:hover { background: $warning; border-color: $warning; color: $onaccent; }
+QPushButton#connectButton[state="error"] { background: $dangersoft; border-color: $dangerline; color: $danger; }
+QPushButton#connectButton[state="error"]:hover { background: $danger; border-color: $danger; color: $onaccent; }
+QPushButton#connectButton[state="loading"]:disabled { background: $accentsoft; border-color: $accentline; color: $accenthi; }
+
+QPushButton#secondaryAction, QPushButton#modalSecondary, QPushButton#advancedButton { background: $surfacehi; border-color: $line; color: $text; }
+QPushButton#secondaryAction:hover, QPushButton#modalSecondary:hover, QPushButton#advancedButton:hover { background: $surface; border-color: $linehi; }
 QPushButton#advancedButton { min-height: 20px; padding: 5px 12px; }
-QPushButton#quietButton, QPushButton#metricAction, QPushButton#toolAction { background: rgba(8,26,50,0.5); border-color: rgba(80,127,167,0.44); color: #c1d3e4; }
-QPushButton#quietButton:hover, QPushButton#metricAction:hover, QPushButton#toolAction:hover { background: rgba(49,17,78,0.8); color: #c084f8; border-color: rgba(143,35,245,0.52); }
-QPushButton#dangerButton { background: rgba(78,20,43,0.56); border-color: rgba(255,92,124,0.42); color: #ffb7c5; }
-QPushButton#dangerButton:hover { background: rgba(116,29,56,0.76); border-color: #ff718c; color: #fff1f4; }
+QPushButton#quietButton, QPushButton#metricAction, QPushButton#toolAction { background: transparent; border-color: $line; color: $textdim; }
+QPushButton#quietButton:hover, QPushButton#metricAction:hover, QPushButton#toolAction:hover { background: $surfacehi; color: $text; border-color: $linehi; }
+QPushButton#dangerButton { background: transparent; border-color: $dangerline; color: $danger; }
+QPushButton#dangerButton:hover { background: $dangersoft; border-color: $danger; }
 
-QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QListWidget, QTableWidget, QTableView { background: rgba(4,15,31,0.92); border: 1px solid rgba(66,118,161,0.55); border-radius: 11px; padding: 8px 10px; selection-background-color: #480b82; selection-color: #ffffff; }
-QLineEdit:hover, QTextEdit:hover, QPlainTextEdit:hover, QComboBox:hover { border-color: rgba(143,80,201,0.72); }
-QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QListWidget:focus, QTableWidget:focus, QTableView:focus { border: 1px solid $accent; background: rgba(6,22,42,0.98); }
-QLineEdit[invalid="true"], QTextEdit[invalid="true"] { border: 1px solid $danger; background: rgba(65,15,35,0.55); }
+/* -------------------------------------------------------------- inputs --- */
+QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QListWidget, QTableWidget, QTableView { background: $surfacein; border: 1px solid $line; border-radius: 10px; padding: 8px 10px; color: $text; selection-background-color: $accentlo; selection-color: #ffffff; }
+QLineEdit:hover, QTextEdit:hover, QPlainTextEdit:hover, QComboBox:hover { border-color: $linehi; }
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QListWidget:focus, QTableWidget:focus, QTableView:focus { border-color: $accent; }
+QLineEdit[invalid="true"], QTextEdit[invalid="true"] { border-color: $danger; background: $dangersoft; }
+QLineEdit:disabled, QComboBox:disabled, QPlainTextEdit:disabled { color: $faint; background: $canvassoft; }
 QComboBox { min-height: 28px; padding-left: 11px; padding-right: 34px; }
 QComboBox#countryCombo { min-height: 20px; }
 QComboBox#carrierModeCombo { min-height: 20px; padding: 4px 28px 4px 9px; }
 QComboBox::drop-down { border: 0; width: 30px; }
 QComboBox::down-arrow { image: url("$chevronicon"); width: 14px; height: 14px; }
-QComboBox QAbstractItemView { background: #0b1d35; border: 1px solid #315879; border-radius: 8px; padding: 5px; selection-background-color: #3b0e66; }
+QComboBox QAbstractItemView { background: $surfacehi; border: 1px solid $line; border-radius: 8px; padding: 5px; selection-background-color: $accentsofthi; }
 QAbstractSpinBox::up-button, QAbstractSpinBox::down-button { width: 0; height: 0; border: 0; }
-QCheckBox { spacing: 9px; color: #d1deec; }
-QCheckBox::indicator { width: 18px; height: 18px; border: 1px solid #4d6e8e; border-radius: 5px; background: #071529; }
+
+QCheckBox { spacing: 9px; color: $textdim; }
+QCheckBox::indicator { width: 18px; height: 18px; border: 1px solid $linehi; border-radius: 5px; background: $surfacein; }
 QCheckBox::indicator:hover { border-color: $accent; }
-QCheckBox::indicator:checked { image: url("$checkicon"); background: $accent; border-color: #d5a9ff; }
-QCheckBox::indicator:disabled { background: #111f32; border-color: #293d53; }
+QCheckBox::indicator:checked { image: url("$checkicon"); background: $accent; border-color: $accent; }
+QCheckBox::indicator:disabled { background: $canvassoft; border-color: $line; }
 QCheckBox#toggleSwitch::indicator { width: 0; height: 0; border: 0; image: none; }
 
-QFrame#numericInput { background: #06162a; border: 1px solid rgba(66,118,161,0.56); border-radius: 10px; min-width: 112px; }
-QLineEdit#numericEdit { background: transparent; border: 0; padding: 2px; font-family: "Segoe UI"; font-weight: 850; color: #f5eaff; }
-QPushButton#numericStep { min-height: 30px; background: rgba(17,54,82,0.9); border: 0; border-radius: 7px; padding: 0; color: #b572f3; font-size: 16px; font-weight: 850; }
-QPushButton#numericStep:hover { background: #4a1779; color: white; }
-QLabel#numericSuffix { color: #7f98b4; font-size: 10px; }
+QFrame#numericInput { background: $surfacein; border: 1px solid $line; border-radius: 10px; min-width: 112px; }
+QLineEdit#numericEdit { background: transparent; border: 0; padding: 2px; font-weight: 700; color: $text; }
+QPushButton#numericStep { min-height: 30px; background: $surfacehi; border: 0; border-radius: 7px; padding: 0; color: $textdim; font-size: 16px; font-weight: 700; }
+QPushButton#numericStep:hover { background: $accent; color: $onaccent; }
+QLabel#numericSuffix { color: $muted; font-size: 10px; }
 
-QFrame#pageToolbar, QFrame#makerTestBar { background: rgba(9,25,51,0.88); border: 1px solid rgba(168,85,247,0.2); border-radius: 15px; }
-QFrame#configPanel, QFrame#tableFrame { background: rgba(7,21,43,0.86); border: 1px solid rgba(168,85,247,0.21); border-radius: 17px; }
-QFrame#makerSourceCard { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(8,32,57,0.96),stop:1 rgba(8,23,48,0.94)); border: 1px solid rgba(168,85,247,0.27); border-radius: 17px; }
-QFrame#makerResultsPanel { background: rgba(5,18,37,0.94); border: 1px solid rgba(168,85,247,0.24); border-radius: 17px; }
-QFrame#makerResultToolbar { background: rgba(10,29,54,0.96); border: 0; border-bottom: 1px solid rgba(168,85,247,0.19); border-top-left-radius: 16px; border-top-right-radius: 16px; }
-QFrame#makerActionBar { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 rgba(34,8,58,0.93),stop:1 rgba(18,25,65,0.92)); border: 1px solid rgba(168,85,247,0.27); border-radius: 15px; }
-QLabel#makerStepTitle { color: #ddb9ff; font-size: 12px; font-weight: 850; }
-QLabel#makerDestination { color: #b978f5; background: rgba(38,7,67,0.65); border: 1px solid rgba(143,35,245,0.28); border-radius: 9px; padding: 7px 10px; font-size: 11px; font-weight: 800; }
-QTabBar#routeSourceTabs::tab { min-height: 20px; padding: 4px 12px; margin: 0 2px; border-radius: 8px; font-size: 10px; }
-QFrame#makerSourceCard QPushButton, QFrame#makerTestBar QPushButton, QFrame#makerResultToolbar QPushButton, QFrame#makerActionBar QPushButton { min-height: 26px; padding: 4px 9px; border-radius: 9px; }
-QFrame#makerSourceCard QPushButton[guided="true"], QFrame#makerTestBar QPushButton[guided="true"], QFrame#makerActionBar QPushButton[guided="true"] { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 rgba(108,20,190,0.96),stop:0.52 rgba(143,35,245,0.98),stop:1 rgba(153,44,255,0.96)); border: 2px solid #e3c5ff; color: #140323; font-weight: 900; }
-QLineEdit#makerRepoUrl { min-height: 22px; padding: 4px 8px; }
-QLineEdit#makerSearch { min-height: 30px; }
-QComboBox#makerStatusFilter { min-width: 132px; }
-QTableView#makerResultsTable { background: rgba(3,14,29,0.9); border: 0; border-radius: 0; padding: 0; alternate-background-color: rgba(8,25,46,0.82); gridline-color: transparent; }
-QTableView#makerResultsTable::item { padding: 9px 10px; border-bottom: 1px solid rgba(168,85,247,0.09); color: #d3e5f2; }
-QTableView#makerResultsTable::item:hover { background: rgba(47,15,76,0.78); }
-QTableView#makerResultsTable::item:selected { background: rgba(50,9,88,0.82); color: #fcf8ff; }
-QTabWidget#profileTabs::pane, QTabWidget#scannerTabs::pane { background: rgba(5,17,34,0.84); border: 0; border-top: 1px solid rgba(168,85,247,0.17); border-radius: 12px; top: -1px; }
-QTabBar::tab { background: rgba(9,27,51,0.82); padding: 10px 23px; border: 1px solid transparent; border-radius: 10px; margin: 4px; color: $muted; font-weight: 650; }
-QTabBar::tab:hover { background: rgba(18,53,80,0.82); color: $text; }
-QTabBar::tab:selected { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 rgba(53,9,94,0.8),stop:1 rgba(46,13,76,0.82)); border-color: rgba(143,35,245,0.42); color: #dfbcff; font-weight: 850; }
-QTabBar::tab:focus { border-color: $accent; }
-QTabBar::tab:disabled { color: #425a73; background: #081525; }
-QListWidget#manualConfigList, QListWidget#userConfigList, QListWidget#suggestedConfigList { background: transparent; border: 0; border-radius: 0; padding: 4px; }
-QListWidget#manualConfigList::item { min-height: 54px; background: rgba(9,28,53,0.86); border: 1px solid rgba(62,113,154,0.34); border-radius: 11px; padding: 9px 12px; margin: 2px 4px; color: #d8e6f3; }
-QListWidget#userConfigList::item, QListWidget#suggestedConfigList::item { min-height: 44px; background: rgba(9,28,53,0.86); border: 1px solid rgba(62,113,154,0.34); border-radius: 9px; padding: 6px 10px; margin: 1px 3px; color: #d8e6f3; }
-QListWidget#manualConfigList::item:hover, QListWidget#userConfigList::item:hover, QListWidget#suggestedConfigList::item:hover { background: rgba(13,45,70,0.92); border-color: rgba(168,85,247,0.38); }
-QListWidget#manualConfigList::item:selected, QListWidget#userConfigList::item:selected, QListWidget#suggestedConfigList::item:selected { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 rgba(50,8,89,0.88),stop:1 rgba(12,47,75,0.9)); border: 1px solid rgba(143,35,245,0.7); color: #ffffff; }
-QListWidget#userConfigList::item:disabled { min-height: 24px; background: rgba(38,8,66,0.88); border: 1px solid rgba(143,35,245,0.24); border-radius: 8px; padding: 4px 10px; margin: 5px 3px 1px 3px; color: #b679ef; }
-QFrame#profileListRow { background: transparent; border: 0; }
-QLabel#profileRowIcon { background: transparent; border: 0; }
-QLabel#profileRowTitle { background: transparent; border: 0; color: #f7eeff; font-size: 12px; font-weight: 750; }
-QLabel#profileRowDetail { background: transparent; border: 0; color: #c99ff0; font-size: 11px; }
-QLabel#profileRowRecommendation { background: transparent; border: 0; color: #c68ff9; font-size: 10px; font-weight: 750; }
-QToolButton#profileRowActivate { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #8621e5,stop:1 #9834f5); border: 1px solid rgba(213,168,255,0.72); border-radius: 8px; padding: 0 9px; color: #150623; font-size: 11px; font-weight: 850; }
-QToolButton#profileRowActivate:hover { background: #bf7bff; border-color: #ffffff; }
-QToolButton#profileRowActivate[active="true"] { background: rgba(69,25,111,0.72); border-color: rgba(163,87,235,0.5); color: #e4c8ff; }
-QToolButton#profileRowEdit, QToolButton#profileRowDelete { background: rgba(9,31,55,0.88); border: 1px solid rgba(123,74,168,0.42); border-radius: 8px; padding: 0; }
-QToolButton#profileRowEdit:hover { background: rgba(61,21,98,0.94); border-color: rgba(179,98,255,0.78); }
-QToolButton#profileRowDelete:hover { background: rgba(91,25,45,0.94); border-color: rgba(255,98,125,0.86); }
-QLabel#profileRowPing { background: rgba(10,31,54,0.98); border: 1px solid rgba(86,135,173,0.55); border-radius: 9px; color: #8faac1; font-family: "Cascadia Mono", "Segoe UI"; font-size: 12px; font-weight: 900; }
-QLabel#profileRowPing[state="fast"] { background: rgba(47,10,82,0.92); border-color: rgba(35,245,166,0.72); color: #ddb9ff; }
-QLabel#profileRowPing[state="medium"] { background: rgba(88,67,18,0.9); border-color: rgba(255,209,102,0.7); color: #ffe8a8; }
-QLabel#profileRowPing[state="slow"] { background: rgba(89,29,49,0.92); border-color: rgba(255,92,124,0.72); color: #ffc0ce; }
-QFrame#profileSelectionBar { background: rgba(7,27,49,0.98); border: 1px solid rgba(168,85,247,0.22); border-radius: 9px; }
-QLabel#profileSelectionLabel { background: transparent; border: 0; color: #c3a9dc; font-size: 11px; font-weight: 700; }
-QCheckBox#profileSelectAll { background: transparent; border: 0; padding: 0; }
-QComboBox#profileSortCombo { background: rgba(5,22,40,0.98); border: 1px solid rgba(137,82,188,0.52); border-radius: 8px; padding: 3px 9px; font-size: 11px; font-weight: 700; }
-
-QFrame#scanControlCard { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(10,31,62,0.94),stop:1 rgba(7,22,45,0.92)); border: 1px solid rgba(168,85,247,0.26); border-radius: 19px; }
-QFrame#scanOptions { background: rgba(7,24,48,0.82); border: 1px solid rgba(168,85,247,0.18); border-radius: 14px; }
-QLabel#helperText, QLabel#settingsSubtitle, QLabel#modalSubtitle { color: #aebfd5; font-size: 12px; }
-QPlainTextEdit#domainEditor { font-family: "Cascadia Mono", "Consolas"; font-size: 13px; color: #e9d9f8; background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 rgba(3,15,31,0.98),stop:1 rgba(5,21,40,0.98)); border-radius: 12px; padding: 12px; }
-QFrame#scanProgressPanel { background: rgba(8,25,49,0.9); border: 1px solid rgba(168,85,247,0.2); border-radius: 14px; }
-QLabel#scanStatus { color: #a8bad0; font-size: 11px; font-weight: 800; }
-QLabel#scanStatus[state="running"] { color: #b871fa; }
-QLabel#scanStatus[state="success"] { color: $success; }
-QLabel#scanStatus[state="warning"] { color: $warning; }
-QLabel#scanPercent { color: $accent; font-size: 15px; font-weight: 900; }
-QLabel#scanDomain { color: #829bb5; font-family: "Cascadia Mono", "Consolas"; font-size: 11px; }
-QTableWidget#resultsTable, QTableWidget#processTable { background: rgba(4,15,31,0.88); border: 0; border-radius: 0; padding: 0; alternate-background-color: rgba(8,24,45,0.78); gridline-color: transparent; }
-QTableWidget#resultsTable::item, QTableWidget#processTable::item { padding: 9px 10px; border-bottom: 1px solid rgba(168,85,247,0.09); color: #cfdeeb; }
-QTableWidget#resultsTable::item:hover, QTableWidget#processTable::item:hover { background: rgba(47,15,76,0.78); }
-QTableWidget#resultsTable::item:selected, QTableWidget#processTable::item:selected { background: rgba(48,10,84,0.78); color: #fcf8ff; }
-QHeaderView::section { background: #0c203b; border: 0; border-bottom: 1px solid rgba(168,85,247,0.28); padding: 11px 10px; font-size: 11px; font-weight: 850; color: #cfa7f4; }
-QLabel#statusBadge { border-radius: 9px; padding: 3px 8px; font-size: 10px; font-weight: 850; }
-QLabel#statusBadge[kind="success"] { color: #8ff8bc; background: rgba(34,8,59,0.8); border: 1px solid rgba(35,245,166,0.32); }
-QLabel#statusBadge[kind="warning"] { color: #ffe09b; background: rgba(65,45,12,0.78); border: 1px solid rgba(255,209,102,0.35); }
-QLabel#statusBadge[kind="danger"] { color: #ffadbc; background: rgba(66,17,37,0.78); border: 1px solid rgba(255,92,124,0.38); }
-QLabel#statusBadge[kind="info"] { color: #ce9aff; background: rgba(41,9,70,0.8); border: 1px solid rgba(153,44,255,0.32); }
-QLabel#selectionText { color: #9bb0c8; font-size: 11px; font-weight: 700; }
-
-QFrame#terminalCard { background: rgba(3,12,25,0.96); border: 1px solid rgba(168,85,247,0.24); border-radius: 17px; }
-QFrame#terminalToolbar { background: rgba(9,27,49,0.96); border-bottom: 1px solid rgba(168,85,247,0.2); border-top-left-radius: 16px; border-top-right-radius: 16px; }
-QLabel#terminalLive { color: $success; font-size: 10px; font-weight: 900; letter-spacing: 1.5px; }
-QLineEdit#logFilter { min-height: 30px; background: rgba(3,14,29,0.8); }
-QTextEdit#logs { font-family: "Cascadia Mono", "Consolas"; font-size: 13px; color: #d7e8f5; background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 rgba(2,10,22,0.99),stop:1 rgba(3,15,28,0.99)); border: 0; border-radius: 0; padding: 18px; selection-background-color: #40126b; }
-QFrame#searchWrap { min-height: 42px; background: rgba(4,15,31,0.9); border: 1px solid rgba(66,118,161,0.5); border-radius: 11px; }
+QFrame#searchWrap { min-height: 42px; background: $surfacein; border: 1px solid $line; border-radius: 10px; }
 QFrame#searchWrap:focus { border-color: $accent; }
 QLineEdit#processSearch { min-height: 30px; background: transparent; border: 0; padding: 4px; }
 QLineEdit#processSearch:focus { background: transparent; border: 0; }
 
-QFrame#toolCard, QFrame#helpCard { min-height: 180px; background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(11,32,63,0.94),stop:1 rgba(7,22,44,0.9)); border: 1px solid rgba(168,85,247,0.22); border-radius: 19px; }
-QFrame#toolCard:hover, QFrame#helpCard:hover { border-color: rgba(168,85,247,0.52); background: rgba(12,39,70,0.94); }
-QLabel#toolIcon, QLabel#supportIcon, QLabel#modalIcon, QLabel#helpIcon { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(51,12,87,0.82),stop:1 rgba(12,39,75,0.84)); border: 1px solid rgba(143,35,245,0.30); border-radius: 13px; qproperty-alignment: AlignCenter; }
-QLabel#toolStatus { padding: 4px 8px; border-radius: 8px; color: #ffbdca; background: rgba(73,17,36,0.7); border: 1px solid rgba(255,92,124,0.3); font-size: 10px; font-weight: 800; }
-QLabel#toolStatus[available="true"] { color: #8ff8bc; background: rgba(34,8,58,0.72); border-color: rgba(35,245,166,0.3); }
-QLabel#toolTitle, QLabel#supportTitle, QLabel#helpTitle { color: #fbf7ff; font-size: 18px; font-weight: 880; }
-QLabel#toolDescription, QLabel#supportDescription, QLabel#helpText { color: #b4c7dc; font-size: 13px; font-weight: 500; }
-QFrame#supportHero { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(36,8,62,0.92),stop:0.7 rgba(8,27,55,0.94),stop:1 rgba(32,18,75,0.82)); border: 1px solid rgba(168,85,247,0.32); border-radius: 21px; }
-QFrame#updateCard { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(8,31,57,0.96),stop:1 rgba(9,24,52,0.94)); border: 1px solid rgba(168,85,247,0.24); border-radius: 18px; }
-QFrame#updateCard[state="checking"] { border-color: rgba(153,44,255,0.56); }
-QFrame#updateCard[state="available"] { border-color: rgba(35,245,166,0.68); background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(36,7,64,0.96),stop:1 rgba(15,31,68,0.95)); }
-QFrame#updateCard[state="error"] { border-color: rgba(255,92,124,0.55); }
-QLabel#updateIcon { background: rgba(143,35,245,0.10); border: 1px solid rgba(143,35,245,0.30); border-radius: 14px; padding: 10px; }
-QLabel#updateTitle { color: #f4f8ff; font-size: 16px; font-weight: 800; }
-QLabel#updateStatus { color: #b9cce2; font-size: 12px; }
-QLabel#updateVersions { color: #b267f9; font-size: 12px; font-weight: 700; }
-QLabel#credits { color: #657f9c; font-size: 11px; padding: 12px; }
+/* -------------------------------------------------------- config panel --- */
+QFrame#pageToolbar { background: $surface; border: 1px solid $line; border-radius: 14px; }
+QFrame#configPanel, QFrame#tableFrame { background: $surface; border: 1px solid $line; border-radius: 16px; }
 
-QDialog#advancedDialog, QDialog#profileDialog, QDialog#closeChoiceDialog, QMessageBox, QMessageBox#cyberMessageBox { background: #071225; border: 1px solid rgba(168,85,247,0.32); }
-QFrame#modalHeader { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 rgba(12,43,72,0.98),stop:0.68 rgba(8,32,59,0.98),stop:1 rgba(19,35,74,0.96)); border-bottom: 1px solid rgba(168,85,247,0.28); }
-QFrame#modalFooter { background: rgba(5,18,36,0.98); border-top: 1px solid rgba(168,85,247,0.18); }
-QScrollArea#modalScroll, QScrollArea#modalScroll > QWidget, QScrollArea#modalScroll > QWidget > QWidget { background: #071225; border: 0; }
-QFrame#settingsSection { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(11,33,62,0.96),stop:1 rgba(7,24,48,0.95)); border: 1px solid rgba(168,85,247,0.2); border-radius: 16px; }
-QLabel#modalTitle { color: #fbf7ff; font-size: 24px; font-weight: 900; }
-QLabel#settingsTitle { color: #f6edff; font-size: 15px; font-weight: 850; }
+QTabWidget#profileTabs::pane { background: transparent; border: 0; border-top: 1px solid $line; top: -1px; }
+QTabBar::tab { background: transparent; padding: 9px 22px; border: 1px solid transparent; border-radius: 9px; margin: 4px 3px; color: $textdim; font-weight: 400; }
+QTabBar::tab:hover { background: $surfacehi; color: $text; }
+QTabBar::tab:selected { background: $accentsoft; border-color: $accentline; color: $text; font-weight: 700; }
+QTabBar::tab:focus { border-color: $accent; }
+QTabBar::tab:disabled { color: $faint; background: transparent; }
+
+QListWidget#manualConfigList, QListWidget#userConfigList { background: transparent; border: 0; border-radius: 0; padding: 4px; }
+QListWidget#manualConfigList::item, QListWidget#userConfigList::item { background: $surfacein; border: 1px solid $line; border-radius: 10px; padding: 4px 6px; margin: 3px 4px; color: $text; }
+QListWidget#manualConfigList::item { min-height: 54px; }
+QListWidget#userConfigList::item { min-height: 46px; }
+QListWidget#manualConfigList::item:hover, QListWidget#userConfigList::item:hover { background: $surfacehi; border-color: $linehi; }
+QListWidget#manualConfigList::item:selected, QListWidget#userConfigList::item:selected { background: $accentsoft; border-color: $accentline; }
+/* Country group separators are non-selectable items, not rows: keep them flat
+   so they never read as a highlighted config. */
+QListWidget#userConfigList::item:disabled { min-height: 22px; background: transparent; border: 0; border-radius: 0; padding: 2px 8px; margin: 12px 4px 2px 4px; color: $muted; }
+
+QFrame#profileListRow { background: transparent; border: 0; }
+QLabel#profileRowIcon { background: transparent; border: 0; }
+QLabel#profileRowTitle { background: transparent; border: 0; color: $text; font-size: 13px; font-weight: 700; }
+QLabel#profileRowDetail { background: transparent; border: 0; color: $muted; font-size: 11px; }
+QLabel#profileRowRecommendation { background: transparent; border: 0; color: $accenthi; font-size: 10px; font-weight: 700; }
+QToolButton#profileRowActivate { background: $accentsoft; border: 1px solid $accentline; border-radius: 8px; padding: 0 10px; color: $accenthi; font-size: 11px; font-weight: 700; }
+QToolButton#profileRowActivate:hover { background: $accent; border-color: $accent; color: $onaccent; }
+QToolButton#profileRowActivate[active="true"] { background: $successsoft; border-color: $successline; color: $success; }
+QToolButton#profileRowEdit, QToolButton#profileRowDelete { background: transparent; border: 1px solid $line; border-radius: 8px; padding: 0; }
+QToolButton#profileRowEdit:hover { background: $accentsoft; border-color: $accentline; }
+QToolButton#profileRowDelete:hover { background: $dangersoft; border-color: $dangerline; }
+
+/* One construction, three states — the latency column reads as a scale. */
+QLabel#profileRowPing { background: $surfacehi; border: 1px solid $line; border-radius: 8px; color: $muted; font-family: "Cascadia Mono", "Consolas", "Segoe UI"; font-size: 12px; font-weight: 700; }
+QLabel#profileRowPing[state="fast"] { background: $successsoft; border-color: $successline; color: $success; }
+QLabel#profileRowPing[state="medium"] { background: $warningsoft; border-color: $warningline; color: $warning; }
+QLabel#profileRowPing[state="slow"] { background: $dangersoft; border-color: $dangerline; color: $danger; }
+
+QFrame#profileSelectionBar { background: $surfacein; border: 1px solid $line; border-radius: 10px; }
+QLabel#profileSelectionLabel { background: transparent; border: 0; color: $textdim; font-size: 11px; }
+QCheckBox#profileSelectAll { background: transparent; border: 0; padding: 0; }
+QComboBox#profileSortCombo { background: $surfacein; border: 1px solid $line; border-radius: 8px; padding: 3px 9px; font-size: 11px; font-weight: 400; }
+
+/* --------------------------------------------------------------- table --- */
+QTableWidget#processTable { background: transparent; border: 0; border-radius: 0; padding: 0; alternate-background-color: $surfacein; gridline-color: transparent; }
+QTableWidget#processTable::item { padding: 9px 10px; border-bottom: 1px solid $line; color: $textdim; }
+QTableWidget#processTable::item:hover { background: $surfacehi; color: $text; }
+QTableWidget#processTable::item:selected { background: $accentsoft; color: $text; }
+QHeaderView::section { background: $surfacehi; border: 0; border-bottom: 1px solid $line; padding: 11px 10px; font-size: 11px; font-weight: 700; color: $muted; }
+
+QLabel#statusBadge { border-radius: 8px; padding: 3px 8px; font-size: 10px; font-weight: 700; background: $surfacehi; border: 1px solid $line; color: $textdim; }
+QLabel#statusBadge[kind="success"] { color: $success; background: $successsoft; border-color: $successline; }
+QLabel#statusBadge[kind="warning"] { color: $warning; background: $warningsoft; border-color: $warningline; }
+QLabel#statusBadge[kind="danger"] { color: $danger; background: $dangersoft; border-color: $dangerline; }
+QLabel#statusBadge[kind="info"] { color: $accenthi; background: $accentsoft; border-color: $accentline; }
+QLabel#selectionText, QLabel#helperText, QLabel#settingsSubtitle, QLabel#modalSubtitle { color: $textdim; font-size: 12px; }
+
+/* ------------------------------------------------------------ terminal --- */
+QFrame#terminalCard { background: $surface; border: 1px solid $line; border-radius: 16px; }
+QFrame#terminalToolbar { background: transparent; border: 0; border-bottom: 1px solid $line; }
+QLabel#terminalLive { color: $success; font-size: 10px; font-weight: 700; letter-spacing: 1.4px; }
+QLineEdit#logFilter { min-height: 30px; }
+QTextEdit#logs { font-family: "Cascadia Mono", "Consolas"; font-size: 13px; color: $textdim; background: $canvas; border: 0; border-radius: 0; padding: 18px; selection-background-color: $accentlo; }
+
+/* ---------------------------------------------------- tools & support --- */
+QFrame#toolCard, QFrame#helpCard { min-height: 172px; background: $surface; border: 1px solid $line; border-radius: 16px; }
+QFrame#toolCard:hover, QFrame#helpCard:hover { background: $surfacehi; border-color: $linehi; }
+QLabel#toolIcon, QLabel#supportIcon, QLabel#modalIcon, QLabel#helpIcon { background: $accentsoft; border: 1px solid $accentline; border-radius: 12px; qproperty-alignment: AlignCenter; }
+QLabel#toolStatus { padding: 4px 8px; border-radius: 8px; color: $danger; background: $dangersoft; border: 1px solid $dangerline; font-size: 10px; font-weight: 700; }
+QLabel#toolStatus[available="true"] { color: $success; background: $successsoft; border-color: $successline; }
+QLabel#toolTitle, QLabel#supportTitle, QLabel#helpTitle { color: $text; font-size: 17px; font-weight: 700; }
+QLabel#toolDescription, QLabel#supportDescription, QLabel#helpText { color: $textdim; font-size: 13px; }
+QFrame#supportHero { background: $surface; border: 1px solid $line; border-radius: 18px; }
+
+QFrame#updateCard { background: $surface; border: 1px solid $line; border-radius: 16px; }
+QFrame#updateCard[state="checking"] { border-color: $accentline; }
+QFrame#updateCard[state="available"] { border-color: $successline; background: $successsoft; }
+QFrame#updateCard[state="error"] { border-color: $dangerline; }
+QLabel#updateIcon { background: $accentsoft; border: 1px solid $accentline; border-radius: 12px; padding: 10px; }
+QLabel#updateTitle { color: $text; font-size: 16px; font-weight: 700; }
+QLabel#updateStatus { color: $textdim; font-size: 12px; }
+QLabel#updateVersions { color: $muted; font-size: 12px; }
+QLabel#credits { color: $faint; font-size: 11px; padding: 12px; }
+
+/* -------------------------------------------------------------- modals --- */
+QDialog#advancedDialog, QDialog#profileDialog, QDialog#closeChoiceDialog, QDialog#cubeLoginDialog, QDialog#cubeServicesDialog, QMessageBox { background: $canvas; border: 1px solid $line; }
+QFrame#modalHeader { background: $surface; border: 0; border-bottom: 1px solid $line; }
+QFrame#modalFooter { background: $surface; border: 0; border-top: 1px solid $line; }
+QScrollArea#modalScroll, QScrollArea#modalScroll > QWidget, QScrollArea#modalScroll > QWidget > QWidget { background: $canvas; border: 0; }
+QFrame#settingsSection { background: $surface; border: 1px solid $line; border-radius: 14px; }
+QLabel#modalTitle { color: $text; font-size: 22px; font-weight: 700; }
+QLabel#settingsTitle { color: $text; font-size: 15px; font-weight: 700; }
 QTextEdit#configEditor { font-family: "Cascadia Mono", "Consolas"; font-size: 12px; }
-QLabel#validationError { color: #ff9eb0; background: rgba(73,17,36,0.6); border: 1px solid rgba(255,92,124,0.3); border-radius: 9px; padding: 8px 10px; }
+QLabel#validationError { color: $danger; background: $dangersoft; border: 1px solid $dangerline; border-radius: 9px; padding: 8px 10px; }
 QDialogButtonBox QPushButton, QMessageBox QPushButton { min-width: 96px; }
 QMessageBox QLabel { color: $text; min-width: 340px; font-size: 13px; }
-QDialog#closeChoiceDialog { border: 1px solid rgba(143,35,245,0.52); }
-QLabel#closeChoiceIcon { background: rgba(45,11,77,0.78); border: 1px solid rgba(143,35,245,0.38); border-radius: 12px; }
-QLabel#closeChoiceTitle { color: #fbf7ff; font-size: 17px; font-weight: 900; }
-QLabel#closeChoiceText { color: #c4d7e9; font-size: 12px; }
-QLabel#closeChoiceDetail { color: #7fa2bd; font-size: 11px; padding: 3px 2px; }
+QLabel#closeChoiceIcon { background: $accentsoft; border: 1px solid $accentline; border-radius: 11px; }
+QLabel#closeChoiceTitle { color: $text; font-size: 17px; font-weight: 700; }
+QLabel#closeChoiceText { color: $textdim; font-size: 12px; }
+QLabel#closeChoiceDetail { color: $muted; font-size: 11px; padding: 3px 2px; }
 QDialog#closeChoiceDialog QPushButton { min-height: 36px; padding: 6px 10px; }
-QPushButton#trayChoiceButton { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 $accent,stop:1 $accent2); border: 1px solid rgba(228,199,255,0.86); color: #031422; font-weight: 900; }
-QPushButton#trayChoiceButton:hover { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #b05ffb,stop:1 #b361ff); border-color: #f1e3ff; }
 
-QFrame#updateNotification { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 rgba(37,7,66,0.99),stop:0.5 rgba(8,32,61,0.99),stop:1 rgba(31,24,79,0.99)); border: 1px solid rgba(177,94,255,0.72); border-radius: 20px; }
-QFrame#updateNotificationAccent { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #d4a7ff,stop:0.5 #8f23f5,stop:1 #992cff); border: 0; border-radius: 2px; }
-QLabel#updateNotificationIcon { background: qradialgradient(cx:0.4,cy:0.32,radius:0.8,stop:0 rgba(169,77,255,0.38),stop:1 rgba(50,9,88,0.82)); border: 1px solid rgba(195,131,255,0.48); border-radius: 17px; qproperty-alignment: AlignCenter; }
-QLabel#updateNotificationEyebrow { color: #ba71ff; font-size: 9px; font-weight: 900; letter-spacing: 1.7px; }
-QLabel#updateNotificationTitle { color: #ffffff; font-size: 19px; font-weight: 900; }
-QLabel#updateNotificationDetail { color: #c1d8e9; font-size: 12px; font-weight: 600; }
-QPushButton#updateNotificationPrimary { min-height: 20px; padding: 4px 12px; color: #031422; background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #8f23f5,stop:1 #9e36ff); border: 1px solid rgba(238,220,255,0.92); border-radius: 12px; font-size: 12px; font-weight: 900; }
-QPushButton#updateNotificationPrimary:hover { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #bd76ff,stop:1 #be78ff); border-color: #ffffff; }
+/* ------------------------------------------------- notifications/toasts --- */
+QFrame#updateNotification { background: $surfacehi; border: 1px solid $accentline; border-radius: 16px; }
+QFrame#updateNotificationAccent { background: $accent; border: 0; border-radius: 2px; }
+QLabel#updateNotificationIcon { background: $accentsoft; border: 1px solid $accentline; border-radius: 14px; qproperty-alignment: AlignCenter; }
+QLabel#updateNotificationEyebrow { color: $muted; font-size: 9px; font-weight: 700; letter-spacing: 1.6px; }
+QLabel#updateNotificationTitle { color: $text; font-size: 18px; font-weight: 700; }
+QLabel#updateNotificationDetail { color: $textdim; font-size: 12px; }
+QPushButton#updateNotificationPrimary { min-height: 20px; padding: 4px 12px; color: $onaccent; background: $accent; border: 1px solid $accent; border-radius: 10px; font-size: 12px; font-weight: 700; }
+QPushButton#updateNotificationPrimary:hover { background: $accenthi; border-color: $accenthi; }
 
-QFrame#toast { background: rgba(10,31,57,0.98); border: 1px solid rgba(168,85,247,0.38); border-radius: 14px; }
-QFrame#toast[kind="success"] { border-color: rgba(35,245,166,0.5); }
-QFrame#toast[kind="warning"] { border-color: rgba(255,209,102,0.58); }
-QFrame#toast[kind="danger"] { border-color: rgba(255,92,124,0.62); }
-QLabel#toastText { color: #f7eeff; font-weight: 700; }
-QPushButton#toastAction { min-height: 28px; background: transparent; border: 0; color: #b672f6; font-weight: 850; padding: 5px 8px; }
+QFrame#toast { background: $surfacehi; border: 1px solid $line; border-radius: 12px; }
+QFrame#toast[kind="success"] { border-color: $successline; }
+QFrame#toast[kind="warning"] { border-color: $warningline; }
+QFrame#toast[kind="danger"] { border-color: $dangerline; }
+QLabel#toastText { color: $text; font-weight: 400; }
+QPushButton#toastAction { min-height: 28px; background: transparent; border: 0; color: $accenthi; font-weight: 700; padding: 5px 8px; }
 
-QScrollBar:vertical { background: rgba(5,15,30,0.72); width: 10px; margin: 2px; border-radius: 5px; }
-QScrollBar::handle:vertical { background: #4b276d; border-radius: 5px; min-height: 36px; }
-QScrollBar::handle:vertical:hover { background: #673893; }
-QScrollBar:horizontal { background: rgba(5,15,30,0.72); height: 10px; margin: 2px; border-radius: 5px; }
-QScrollBar::handle:horizontal { background: #4b276d; border-radius: 5px; min-width: 36px; }
-QScrollBar::handle:horizontal:hover { background: #673893; }
+/* --------------------------------------------------------- scan panel --- */
+QFrame#scanProgressPanel { background: $surface; border: 1px solid $line; border-radius: 14px; }
+QLabel#scanStatus { color: $textdim; font-size: 11px; font-weight: 700; }
+QLabel#scanStatus[state="running"] { color: $accenthi; }
+QLabel#scanStatus[state="success"] { color: $success; }
+QLabel#scanStatus[state="warning"] { color: $warning; }
+QLabel#scanPercent { color: $accent; font-size: 15px; font-weight: 700; }
+QLabel#scanDomain { color: $muted; font-family: "Cascadia Mono", "Consolas"; font-size: 11px; }
+
+/* --------------------------------------------------------- scrollbars --- */
+QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; border-radius: 5px; }
+QScrollBar::handle:vertical { background: $line; border-radius: 5px; min-height: 36px; }
+QScrollBar::handle:vertical:hover { background: $linehi; }
+QScrollBar:horizontal { background: transparent; height: 10px; margin: 2px; border-radius: 5px; }
+QScrollBar::handle:horizontal { background: $line; border-radius: 5px; min-width: 36px; }
+QScrollBar::handle:horizontal:hover { background: $linehi; }
 QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page { width: 0; height: 0; background: transparent; }
 """
-for _name, _value in sorted(COLOR_TOKENS.items(), key=lambda item: -len(item[0])):
-    STYLE = STYLE.replace(f"${_name}", _value)
+TRAY_MENU_STYLE = """
+QMenu#trayMenu { background-color: $surface; color: $text; border: 1px solid $line; border-radius: 12px; padding: 8px; }
+QMenu#trayMenu::item { min-height: 32px; padding: 7px 38px 7px 16px; margin: 2px 3px; border-radius: 8px; background: transparent; }
+QMenu#trayMenu::item:selected { background-color: $accentsoft; color: $text; }
+QMenu#trayMenu::item:disabled { color: $faint; }
+QMenu#trayMenu::icon { padding-left: 9px; padding-right: 9px; }
+QMenu#trayMenu::separator { height: 1px; background: $line; margin: 6px 10px; }
+"""
+
+
+def _apply_tokens(sheet: str) -> str:
+    """Expand $token references. Longest name first so $accent never eats
+    $accenthi."""
+    for name, value in sorted(COLOR_TOKENS.items(), key=lambda item: -len(item[0])):
+        sheet = sheet.replace(f"${name}", value)
+    return sheet
+
+
+STYLE = _apply_tokens(STYLE)
+TRAY_MENU_STYLE = _apply_tokens(TRAY_MENU_STYLE)
