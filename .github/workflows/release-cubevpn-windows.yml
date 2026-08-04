@@ -44,6 +44,21 @@ jobs:
           sed -i "s#CUBE_API_BASE_URL = \"\"#CUBE_API_BASE_URL = \"${CUBE_API_BASE_URL}\"#" \
             ./uac_desktop/app_config.py
 
+      # The version the app reports has to come from the tag it is built from.
+      # Hand-editing the constant is what let v1.5.2 ship reporting 1.0.6, so
+      # every install thought it was out of date and reinstalling never helped.
+      - name: Stamp version from release tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -z "${{ inputs.release_tag }}" ]; then
+            echo "No release tag supplied — leaving the source version in place for this test build."
+            exit 0
+          fi
+          python tools/stamp_version.py "$RELEASE_TAG"
+          python -c "import uac_desktop; print('building version', uac_desktop.__version__)"
+
       - name: Run test suite
         run: python -m pytest tests -q
 

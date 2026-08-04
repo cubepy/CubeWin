@@ -8,21 +8,15 @@ UPDATE_REPOSITORY_URL = "https://github.com/cubepy/CubeWin"
 CURRENT_VERSION = __version__
 
 
-def github_latest_release_api(repository_url: str) -> str:
-    value = repository_url.rstrip("/")
-    marker = "github.com/"
-    slug = value.split(marker, 1)[1] if marker in value else "OWNER/REPOSITORY"
-    return f"https://api.github.com/repos/{slug}/releases/latest"
-
-
 GITHUB_RELEASES_URL = f"{UPDATE_REPOSITORY_URL.rstrip('/')}/releases"
-LATEST_VERSION_URL = github_latest_release_api(UPDATE_REPOSITORY_URL)
-UPDATE_CHECK_ENDPOINT = LATEST_VERSION_URL
-PORTABLE_DOWNLOAD_URL = (
-    f"{GITHUB_RELEASES_URL}/latest/download/"
-    f"CubeVPN-v{CURRENT_VERSION}-Windows-x64-portable.zip"
-)
 PROJECT_URL = UPDATE_REPOSITORY_URL
+
+# Removed: PORTABLE_DOWNLOAD_URL, LATEST_VERSION_URL, UPDATE_CHECK_ENDPOINT and
+# github_latest_release_api(). Nothing referenced them, and the download URL
+# was built from the version constant into a filename the release workflow
+# never produces (it packages CubeVPN-windows-x64.zip), so anyone who wired it
+# up would have got a 404. update_checker.GitHubRepository derives the real API
+# and release URLs from UPDATE_REPOSITORY_URL.
 
 # Base URL of the CubeVPN account API (see docs/api-contract.md in the CubeVPN
 # Android repo — this client talks to the same three endpoints:

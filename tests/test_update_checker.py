@@ -132,7 +132,12 @@ def test_latest_release_uses_expected_api_headers_timeout_and_package_version():
 
     assert info.current_version == __version__
     assert info.latest_version == "1.5.1"
-    assert info.is_update_available is True
+    # Whether the fixture release is newer than the shipped version depends on
+    # the version constant, which moves with every release. Assert the
+    # comparison the checker performed, not a value that expires.
+    assert info.is_update_available is (
+        SemVersion.parse("1.5.1") > SemVersion.parse(__version__)
+    )
     assert info.release_url == RELEASE_URL
     assert info.asset_name == "UAC-Spoofer-Desktop-Windows-x64.zip"
     assert info.download_url.endswith("/windows.zip")
