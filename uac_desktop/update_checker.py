@@ -164,6 +164,33 @@ class GitHubRepository:
         return f"https://api.github.com/repos/{self.owner}/{self.name}/releases/latest"
 
 
+def _is_trusted_release_url(release_url: str, repository: GitHubRepository) -> bool:
+    """Accept a release URL from the configured *account*, not one exact name.
+
+    Renaming a repository is normal and GitHub keeps serving the old path by
+    redirect — but the API answers with the new name, so pinning the full
+    canonical URL made every update check fail the moment the repo was renamed.
+
+    The check that actually matters is the trust boundary: the release has to
+    live on github.com under the owner we configured. A different owner or a
+    different host is still rejected, so a hijacked response cannot point
+    users somewhere else.
+    """
+    try:
+        parsed = urlsplit(str(release_url or "").strip())
+    except ValueError:
+        return False
+    if parsed.scheme.lower() != "https":
+        return False
+    if parsed.netloc.lower() not in ("github.com", "www.github.com"):
+        return False
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    # /<owner>/<repository>/releases/...
+    if len(segments) < 4 or segments[2].lower() != "releases":
+        return False
+    return segments[0].casefold() == repository.owner.casefold()
+
+
 def parse_github_repository(repo_url: str) -> GitHubRepository:
     """Validate and split an HTTPS ``github.com/owner/repository`` URL."""
 
@@ -291,7 +318,7 @@ def check_latest_release(
         except InvalidVersion as exc:
             raise UpdateServiceError(f"GitHub release tag is not valid SemVer: {tag_name!r}") from exc
         release_url = str(payload.get("html_url") or "").strip()
-        if not release_url.lower().startswith((repository.canonical_url + "/releases/").lower()):
+        if not _is_trusted_release_url(release_url, repository):
             raise UpdateServiceError("GitHub latest release response has an invalid release URL")
         asset_name, download_url = _preferred_asset(payload)
         return UpdateInfo(

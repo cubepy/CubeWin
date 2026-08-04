@@ -4,6 +4,7 @@ import requests
 import pytest
 
 from uac_desktop import __version__
+from uac_desktop import update_checker
 from uac_desktop.update_checker import (
     DEFAULT_TIMEOUT,
     GITHUB_API_VERSION,
@@ -195,3 +196,29 @@ def test_network_errors_are_wrapped_without_closing_injected_session():
 def test_timeout_must_be_a_positive_pair(timeout):
     with pytest.raises(UpdateCheckError, match="timeout"):
         check_latest_release(REPO_URL, session=FakeSession(FakeResponse(release_payload())), timeout=timeout)
+
+
+def test_release_url_survives_a_repository_rename():
+    """GitHub redirects the old path but answers with the new name.
+
+    Pinning the full canonical URL meant every update check failed the moment
+    the repository was renamed, which is exactly what happened when
+    UAC-SNI-Spoofer-Windows became CubeWin.
+    """
+    repository = parse_github_repository("https://github.com/cubepy/UAC-SNI-Spoofer-Windows")
+    renamed = "https://github.com/cubepy/CubeWin/releases/tag/v1.0.6"
+    assert update_checker._is_trusted_release_url(renamed, repository)
+
+
+def test_release_url_from_another_owner_or_host_is_still_rejected():
+    repository = parse_github_repository("https://github.com/cubepy/CubeWin")
+    for hostile in (
+        "https://github.com/attacker/CubeWin/releases/tag/v1.0.6",
+        "https://attacker.example/cubepy/CubeWin/releases/tag/v1.0.6",
+        "http://github.com/cubepy/CubeWin/releases/tag/v1.0.6",
+        "https://github.com.attacker.example/cubepy/CubeWin/releases/tag/v1",
+        "https://github.com/cubepy/CubeWin/issues/4",
+        "https://github.com/cubepy/CubeWin",
+        "",
+    ):
+        assert not update_checker._is_trusted_release_url(hostile, repository), hostile
