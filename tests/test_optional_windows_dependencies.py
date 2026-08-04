@@ -73,3 +73,31 @@ def test_the_core_refuses_clearly_instead_of_raising_an_import_error(tmp_path):
     assert result.returncode == 0, result.stderr
     assert "REFUSED:" in result.stdout
     assert "WinDivert" in result.stdout
+
+
+def test_requirements_avoids_the_pyside6_addons_download():
+    """The meta-package drags in 316 MB of Qt this app never imports.
+
+    On a slow or unreliable link that download is the most likely point of
+    failure in the whole install, and it buys nothing.
+    """
+    requirements = (ROOT / "requirements.txt").read_text()
+    lines = [l.strip() for l in requirements.splitlines()
+             if l.strip() and not l.strip().startswith("#")]
+    assert any(l.startswith("PySide6-Essentials") for l in lines), lines
+    assert not any(l.startswith("PySide6>") or l == "PySide6" for l in lines), lines
+
+
+def test_only_essentials_qt_modules_are_imported():
+    """Guards the line above: importing from Addons would silently break it."""
+    import re
+    essentials = {"QtCore", "QtGui", "QtWidgets", "QtSvg", "QtSvgWidgets",
+                  "QtNetwork", "QtXml", "QtSql", "QtTest", "QtPrintSupport",
+                  "QtConcurrent", "QtQml", "QtQuick", "QtOpenGL", "QtUiTools"}
+    used = set()
+    for path in ROOT.rglob("*.py"):
+        if ".git" in path.parts:
+            continue
+        used |= set(re.findall(r"from PySide6\.(\w+)", path.read_text(encoding="utf-8")))
+    assert used, "no PySide6 imports found — the check would be vacuous"
+    assert used <= essentials, f"needs PySide6-Addons: {sorted(used - essentials)}"

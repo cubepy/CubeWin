@@ -27,6 +27,16 @@ esac
 
 echo "Target: $OS-$ARCH"
 
+# Downloads here routinely cross unreliable links — a partial transfer that
+# aborts the script is the common failure, not a missing file. Retry, resume
+# what already arrived, and be patient about a slow start.
+download() {
+  local url="$1" out="$2"
+  curl -fL --retry 5 --retry-delay 3 --retry-all-errors \
+       --connect-timeout 20 --speed-time 60 --speed-limit 1024 \
+       -C - -o "$out" "$url"
+}
+
 # --- Xray -------------------------------------------------------------------
 if [ ! -x "$BIN/xray" ]; then
   case "$OS-$ARCH" in
@@ -37,8 +47,8 @@ if [ ! -x "$BIN/xray" ]; then
   esac
   echo "Downloading $XRAY_ASSET..."
   tmp="$(mktemp -d)"
-  curl -fsSL -o "$tmp/xray.zip" \
-    "https://github.com/XTLS/Xray-core/releases/latest/download/$XRAY_ASSET"
+  download "https://github.com/XTLS/Xray-core/releases/latest/download/$XRAY_ASSET" \
+           "$tmp/xray.zip"
   unzip -q "$tmp/xray.zip" -d "$tmp"
   for name in xray geoip.dat geosite.dat LICENSE; do
     [ -f "$tmp/$name" ] && cp "$tmp/$name" "$BIN/"
@@ -54,8 +64,8 @@ if [ ! -x "$BIN/sing-box" ]; then
   SING_ASSET="sing-box-$SING_VERSION-$OS-$ARCH"
   echo "Downloading $SING_ASSET..."
   tmp="$(mktemp -d)"
-  curl -fsSL -o "$tmp/sing-box.tar.gz" \
-    "https://github.com/SagerNet/sing-box/releases/download/v$SING_VERSION/$SING_ASSET.tar.gz"
+  download "https://github.com/SagerNet/sing-box/releases/download/v$SING_VERSION/$SING_ASSET.tar.gz" \
+           "$tmp/sing-box.tar.gz"
   # NOT checksum-pinned, unlike the Windows x64 path in install-engine.ps1.
   # Pin it before this script is ever used for anything shipped.
   tar -xzf "$tmp/sing-box.tar.gz" -C "$tmp"
