@@ -312,7 +312,14 @@ def test_auto_user_config_accepts_verified_reality_route(monkeypatch):
     assert ordered == [reality]
 
 
-def test_auto_user_config_never_falls_back_to_unverified_profiles(monkeypatch):
+def test_auto_falls_back_to_unverified_when_nothing_is_verified_yet(monkeypatch):
+    """Preferring verified routes must not mean refusing every other one.
+
+    Nothing marks an imported or pasted config verified except connecting
+    through it, so treating verification as a precondition left a fresh
+    install with an empty candidate list and no way to leave it. See
+    test_auto_mode_finds_user_configs.py.
+    """
     unverified = profile(
         "untested-user-config",
         origin=USER_CONFIG_ORIGIN,
@@ -330,7 +337,7 @@ def test_auto_user_config_never_falls_back_to_unverified_profiles(monkeypatch):
         auto_enabled=True,
     )
 
-    assert ordered == []
+    assert ordered == [unverified]
 
 
 def test_manual_mode_restores_last_user_config_after_auto_runtime_selection():
@@ -533,6 +540,8 @@ def test_dynamic_countries_are_preserved_named_and_sorted_in_selector(monkeypatc
     assert combo.currentData() == "BR"
     assert labels["BR"] == "Brazil  (0)"
     assert labels["GB"] == "United Kingdom  (1)"
+    # BR is the active filter and has no verified route, so the count is a
+    # real zero here rather than the untested-pool wording.
     assert count.text == "0 verified configs"
 
 

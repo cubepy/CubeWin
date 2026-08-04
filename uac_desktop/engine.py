@@ -1083,6 +1083,35 @@ def build_singbox_tun_config(
     }
 
 
+def _not_executable_message(path) -> str:
+    """Say what to do, not just that it failed.
+
+    A binary that exists without its execute bit raises a bare
+    "[Errno 13] Permission denied" from subprocess, naming nothing the user can
+    act on. This is the normal outcome when install-engine.sh is interrupted
+    mid-run — the file is copied before it is made executable.
+    """
+    fix = f"chmod +x '{path}'"
+    if platform.system() == "Darwin":
+        # Gatekeeper blocks curl-downloaded binaries even once they are +x, and
+        # chmod alone leaves the user stuck with the same failure.
+        fix += f" && xattr -cr '{path.parent}'"
+    return (f"{path} cannot be executed. The engine download was probably "
+            f"interrupted. Fix it with:  {fix}   "
+            f"(or re-run install-engine.sh / install-engine.ps1)")
+
+
+def _require_executable(name: str, label: str):
+    path = BIN / name
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{label} binary not found: {path}. Run install-engine.ps1 "
+            f"(Windows) or ./install-engine.sh (macOS/Linux) once.")
+    if not os.access(path, os.X_OK):
+        raise PermissionError(_not_executable_message(path))
+    return path
+
+
 def select_sni_core(log: Callable[[str], None],
                     traffic: Callable[[int, int], None] | None = None):
     """Pick the SNI-evasion core this machine can actually run.
@@ -1172,15 +1201,14 @@ class Engine:
             raise EngineCancelled("Connection generation changed")
 
     def _binary(self):
-        name = "xray.exe" if platform.system() == "Windows" else "xray"
-        path = BIN / name
-        if not path.exists():
-            raise FileNotFoundError(f"Xray binary not found: {path}. Run install-engine.ps1 once.")
-        return path
+        return _require_executable(
+            "xray.exe" if platform.system() == "Windows" else "xray", "Xray")
 
     def _singbox_binary(self):
         name = "sing-box.exe" if platform.system() == "Windows" else "sing-box"
         path = BIN / name
+        if path.exists() and not os.access(path, os.X_OK):
+            raise PermissionError(_not_executable_message(path))
         if not path.exists():
             raise FileNotFoundError(
                 f"sing-box {SING_BOX_VERSION} binary not found: {path}. "
