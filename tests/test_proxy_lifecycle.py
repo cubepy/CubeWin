@@ -10,6 +10,14 @@ import main as desktop_main
 import uac_desktop.engine as engine_module
 from uac_desktop.engine import Engine, WindowsProxy
 
+# These exercise the Windows registry directly. Off Windows engine_module.winreg
+# is None, so skip rather than error — a macOS developer should get a clean run
+# of everything that can run there.
+pytestmark = pytest.mark.skipif(
+    engine_module.winreg is None,
+    reason="Windows registry tests require winreg",
+)
+
 
 class _FakeKey:
     def __enter__(self):

@@ -45,7 +45,7 @@ from .engine import Engine, EngineCancelled, format_bytes, mci_quality_score
 from .models import ProxyProfile, Tuning, parse_many
 from .network import (GeoLocation, ScanResult, current_ip, current_location,
                       fetch_subscription_uris, profile_ping, profile_real_delay, tcp_ping)
-from .paths import ASSETS, DATA_DIR, LOG_FILE
+from .paths import ASSETS, DATA_DIR, LOG_FILE, reveal
 from .platform_support import (SUPPORTED as SUPPORTED_ARCHITECTURE,
                                detect as detect_host, unsupported_message)
 from .storage import Storage
@@ -2897,7 +2897,7 @@ class MainWindow(QMainWindow):
         rating_layout.addWidget(self.rating_title); rating_layout.addWidget(self.rating_text); rating_layout.addWidget(self.rating_button); side.addWidget(self.rating_card); side.addSpacing(10)
         footer = QFrame(); self.sidebar_footer = footer; footer.setObjectName("sidebarFooter"); footer_layout = QVBoxLayout(footer); footer_layout.setContentsMargins(7, 7, 7, 7); footer_layout.setSpacing(4)
         self.language_button = QPushButton("English"); self.language_button.setObjectName("footerAction"); self.language_button.setMinimumHeight(44); self.language_button.setIcon(cyber_icon("globe", ICON_DIM, 19)); self.language_button.setIconSize(QSize(19, 19)); self.language_button.clicked.connect(self.toggle_language); footer_layout.addWidget(self.language_button)
-        self.data_button = QPushButton("باز کردن پوشه داده‌ها"); self.data_button.setObjectName("footerAction"); self.data_button.setMinimumHeight(44); self.data_button.setIcon(cyber_icon("folder", ICON_DIM, 19)); self.data_button.setIconSize(QSize(19, 19)); self.data_button.clicked.connect(lambda: os.startfile(DATA_DIR)); footer_layout.addWidget(self.data_button); side.addWidget(footer)
+        self.data_button = QPushButton("باز کردن پوشه داده‌ها"); self.data_button.setObjectName("footerAction"); self.data_button.setMinimumHeight(44); self.data_button.setIcon(cyber_icon("folder", ICON_DIM, 19)); self.data_button.setIconSize(QSize(19, 19)); self.data_button.clicked.connect(lambda: reveal(DATA_DIR)); footer_layout.addWidget(self.data_button); side.addWidget(footer)
         layout.addWidget(sidebar)
         content_shell = QFrame(); content_shell.setObjectName("contentShell"); content_layout = QVBoxLayout(content_shell); content_layout.setContentsMargins(0, 0, 0, 0); content_layout.setSpacing(0)
         self.stack = QStackedWidget(); self.stack.setObjectName("content"); content_layout.addWidget(self.stack, 1)
@@ -7341,7 +7341,7 @@ class MainWindow(QMainWindow):
     def _open_log_file(self):
         if not LOG_FILE.exists():
             self._handle_error(self.tr("فایل لاگ هنوز ساخته نشده است", "The log file has not been created yet")); return
-        os.startfile(LOG_FILE); self._set_activity("فایل لاگ باز شد.", "Log file opened.", "success", False)
+        reveal(LOG_FILE); self._set_activity("فایل لاگ باز شد.", "Log file opened.", "success", False)
 
     def shutdown(self):
         if self._closing:

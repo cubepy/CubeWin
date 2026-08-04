@@ -11,13 +11,25 @@ import sys
 import threading
 import time
 import uuid
-import winreg
 from collections.abc import Callable
 from contextlib import contextmanager
 from ctypes import wintypes
 
 import psutil
 import requests
+
+# Windows-only. Imported behind a guard so the package can be imported — and the
+# UI run — on macOS and Linux for development. Every function that touches the
+# registry is already Windows-only at runtime; platform_support.detect() is what
+# tells the user the spoofing core cannot run for them.
+#
+# Guarded on availability rather than os.name: a stub on sys.path is then enough
+# to exercise the registry paths off Windows, which keeps those tests runnable
+# during a port instead of silently skipping.
+try:
+    import winreg
+except ImportError:  # pragma: no cover - exercised only off Windows
+    winreg = None
 
 from . import __version__
 from .gateway import GatewayManager
