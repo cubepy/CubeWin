@@ -5,8 +5,9 @@
 # app can be run from source on a Mac while the platform layer is worked on.
 #
 # It does not fetch a packet-interception driver, because there is no macOS
-# equivalent of WinDivert — see docs/macos-port.md. The app will start and the
-# spoofing core will report that it cannot run on this platform.
+# equivalent of WinDivert — see docs/macos-port.md. The app falls back to TLS
+# fragmentation instead, so the tunnel works; System Proxy, TUN Mode and
+# Mobile Gateway do not, and appear disabled.
 set -euo pipefail
 cd "$(dirname "$0")"
 

@@ -2,11 +2,18 @@
 
 > فارسی: [`macos-fa.md`](macos-fa.md)
 
-This is a scoping document, not a plan of record. Nothing here is built.
+This is a scoping document, not a plan of record.
+
+**Update:** part of it is now built. The app runs on macOS from source and the
+tunnel works, because `select_sni_core()` falls back to `fragment_proxy.py`
+(TLS fragmentation) where WinDivert is unavailable. That is a weaker technique
+than wrong-sequence injection, not an equivalent one, and System Proxy, TUN
+Mode and Mobile Gateway remain Windows-only — the app disables those controls
+and says why. The rest of this document still stands.
 
 The short version: **most of the app ports for free, and the part that does not
 is the part the app exists for.** Packaging a macOS build is not the work;
-replacing the packet-interception core is.
+matching the packet-interception core is.
 
 ## What carries over unchanged
 
@@ -81,24 +88,28 @@ handling.
 Xray and sing-box both publish `darwin-arm64` and `darwin-amd64` builds, so
 `install-engine.ps1` would need a shell counterpart. This part is easy.
 
-## Order of work, if it were ever started
+## Order of work
 
-1. **Answer the core question first.** Prototype the wrong-sequence technique
-   over NetworkExtension, outside this repo, and find out whether macOS permits
-   it at all. Everything below is wasted effort until this is settled.
-2. Split the platform layer out of `engine.py` behind an interface, so Windows
-   and macOS implementations sit side by side. This is worth doing on its own
-   merits even if macOS never happens — that file is 2,541 lines with the
-   platform woven through it.
-3. Port system proxy control.
-4. Port packaging and the engine fetch script.
-5. Mobile Gateway last, or never.
+1. ~~Port the engine fetch script~~ — done, `install-engine.sh`.
+2. ~~Give the platform a core it can actually run~~ — done, the fragmentation
+   fallback. Weaker, but real.
+3. **Port system proxy control.** The largest remaining day-to-day gap: macOS
+   users must point their browser at `127.0.0.1:20808` by hand. `networksetup`
+   is the equivalent, and it needs the same crash-recovery care as
+   `WindowsProxy.recover_stale`.
+4. Split the platform layer out of `engine.py` behind an interface, so Windows
+   and macOS implementations sit side by side. Worth doing on its own merits —
+   that file is 2,541 lines with the platform woven through it.
+5. **Answer the core question**, if fragmentation proves insufficient in the
+   field: prototype wrong-sequence over NetworkExtension, outside this repo,
+   and find out whether macOS permits it at all.
+6. Packaging, signing and notarization.
+7. Mobile Gateway last, or never.
 
 ## Recommendation
 
-Do not start with packaging. Start with step 1, as a throwaway prototype. The
-entire port is contingent on it, it is the smallest piece to test, and if the
-answer is no it saves the rest of the effort.
-
-A macOS build that opens and cannot connect is worse than no macOS build: users
-download it, it fails, and they conclude the project is broken.
+Do not start with packaging. A macOS build that opens and cannot connect is
+worse than no macOS build: users download it, it fails, and they conclude the
+project is broken. That risk is now smaller — it does connect — but a build
+that connects and then silently routes nothing because the user never set a
+proxy fails the same way. Step 3 before step 6.
