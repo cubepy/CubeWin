@@ -74,3 +74,49 @@ def test_stamped_version_is_what_the_updater_would_compare(tmp_path, monkeypatch
     assert SemVersion.parse(stamped) == SemVersion.parse("1.5.2")
     # The whole point: a build tagged v1.5.2 must not look older than v1.5.2.
     assert not SemVersion.parse(stamped) < SemVersion.parse("1.5.2")
+
+
+def _newest_release_tag():
+    """Newest vX.Y.Z tag in this clone, or None when tags are unavailable.
+
+    A CI checkout is shallow and carries no tags, so this returns None there
+    and the check below skips rather than failing for the wrong reason.
+    """
+    import subprocess
+
+    try:
+        raw = subprocess.run(
+            ["git", "tag", "--list", "v*"],
+            cwd=str(pathlib.Path(__file__).resolve().parents[1]),
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if raw.returncode != 0:
+        return None
+    versions = []
+    for line in raw.stdout.split():
+        try:
+            versions.append(SemVersion.parse(stamp_version.normalise(line)))
+        except InvalidVersion:
+            continue
+    return max(versions, default=None)
+
+
+def test_the_source_version_is_never_behind_the_newest_release():
+    """Running from source must not report itself as out of date.
+
+    Release builds get their version stamped from the tag, so this constant
+    only governs a from-source run — and it sat at 1.5.2 while v1.5.3 was
+    published, so `python main.py` announced an update to a version older than
+    the code doing the announcing. That is the same false update prompt this
+    project already fixed once for installed builds.
+    """
+    newest = _newest_release_tag()
+    if newest is None:
+        pytest.skip("no release tags in this checkout (shallow CI clone)")
+    current = SemVersion.parse(uac_desktop.__version__)
+    assert not (current < newest), (
+        f"__version__ is {current} but {newest} is already released; "
+        f"bump it so a from-source run does not prompt for an update"
+    )
