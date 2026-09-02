@@ -6,19 +6,27 @@ import sys
 import textwrap
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 
 # Refuses to import pydivert, whatever is installed in this environment. The
 # bug this guards against was invisible locally precisely because pydivert
 # happened to be present.
+#
+# This must use find_spec. The find_module/load_module pair it used first was
+# removed in Python 3.12, so on the 3.12 CI runner the blocker silently did
+# nothing: pydivert imported normally, the core did not refuse, and the test
+# failed for a reason that had nothing to do with the behaviour it covers.
+# A setup step that can no-op without saying so is the trap here, which is
+# why the effectiveness of this shim is itself asserted below.
 _BLOCK_PYDIVERT = textwrap.dedent("""
     import sys
     class _Block:
-        def find_module(self, name, path=None):
+        def find_spec(self, name, path=None, target=None):
             if name == "pydivert" or name.startswith("pydivert."):
-                return self
-        def load_module(self, name):
-            raise ImportError(f"No module named '{name}'")
+                raise ImportError(f"No module named '{name}'")
+            return None
     sys.meta_path.insert(0, _Block())
 """)
 
@@ -33,6 +41,25 @@ def _run_without_pydivert(body: str, tmp_path: Path):
         [sys.executable, "-c", _BLOCK_PYDIVERT + textwrap.dedent(body)],
         cwd=str(ROOT), capture_output=True, text=True, env=env,
     )
+
+
+def test_the_pydivert_block_actually_blocks(tmp_path):
+    """Guards every test below: a shim that no-ops makes them all vacuous.
+
+    That is not hypothetical — the first version used the find_module API that
+    Python 3.12 removed, so on the CI runner pydivert imported anyway and the
+    tests stopped testing anything.
+    """
+    result = _run_without_pydivert("""
+        try:
+            import pydivert
+        except ImportError as exc:
+            print("BLOCKED:", exc)
+        else:
+            print("NOT BLOCKED")
+    """, tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "BLOCKED:" in result.stdout, result.stdout
 
 
 def test_requirements_marks_pydivert_as_windows_only():
@@ -103,6 +130,12 @@ def test_only_essentials_qt_modules_are_imported():
     assert used <= essentials, f"needs PySide6-Addons: {sorted(used - essentials)}"
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Windows has no execute bit: chmod(0o644) only sets read-only and "
+           "os.access(X_OK) is True for any file that exists, so the guard is "
+           "a deliberate no-op there and there is nothing to assert",
+)
 def test_a_non_executable_engine_binary_says_how_to_fix_it(tmp_path, monkeypatch):
     """An interrupted install leaves the binary copied but not chmod'd.
 
@@ -117,7 +150,7 @@ def test_a_non_executable_engine_binary_says_how_to_fix_it(tmp_path, monkeypatch
     monkeypatch.setattr(engine_module, "BIN", tmp_path)
 
     engine = engine_module.Engine.__new__(engine_module.Engine)
-    with __import__("pytest").raises(PermissionError) as caught:
+    with pytest.raises(PermissionError) as caught:
         engine._binary()
 
     message = str(caught.value)
@@ -143,6 +176,6 @@ def test_a_missing_binary_still_points_at_both_installers(tmp_path, monkeypatch)
 
     monkeypatch.setattr(engine_module, "BIN", tmp_path)
     engine = engine_module.Engine.__new__(engine_module.Engine)
-    with __import__("pytest").raises(FileNotFoundError) as caught:
+    with pytest.raises(FileNotFoundError) as caught:
         engine._binary()
     assert "install-engine.sh" in str(caught.value)
