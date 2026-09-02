@@ -102,6 +102,36 @@ def test_the_core_refuses_clearly_instead_of_raising_an_import_error(tmp_path):
     assert "WinDivert" in result.stdout
 
 
+def test_the_core_refuses_on_a_windows_host_too(tmp_path):
+    """The Windows path had no guard, and that is the one that matters.
+
+    Off Windows the platform check refuses first, so the missing bindings are
+    never reached. On Windows that check passes and the first symptom was
+    PacketInjector.__init__ raising
+
+        AttributeError: 'NoneType' object has no attribute 'SNIFF'
+
+    from a real user's machine whose pydivert install had failed — which names
+    nothing they can act on. The host is faked here so the check runs
+    wherever the suite does.
+    """
+    result = _run_without_pydivert("""
+        import uac_desktop.pattern_core.core as core
+        import uac_desktop.platform_support as ps
+        from uac_desktop.models import ProxyProfile, Tuning
+        core.detect_host = lambda: ps.HostArchitecture(
+            native="x64", process="x64", emulated=False, supported=True, reason="")
+        try:
+            core.PatternSniCore(lambda m: None).start(ProxyProfile(), Tuning())
+        except RuntimeError as exc:
+            print("REFUSED:", exc)
+    """, tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "REFUSED:" in result.stdout, result.stdout
+    assert "pydivert" in result.stdout
+    assert "AttributeError" not in result.stderr
+
+
 def test_requirements_avoids_the_pyside6_addons_download():
     """The meta-package drags in 316 MB of Qt this app never imports.
 

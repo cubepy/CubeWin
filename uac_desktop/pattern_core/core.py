@@ -411,6 +411,18 @@ class PatternSniCore:
         if not host.supported:
             _persian, english = unsupported_message(host)
             raise RuntimeError(english)
+        if WinDivert is None or Flag is None:
+            # The import at the top of this module degrades to None rather than
+            # failing, which is right for hosts that will never use this core.
+            # But on Windows the check above passes, so without this the first
+            # symptom is PacketInjector.__init__ raising
+            # "AttributeError: 'NoneType' object has no attribute 'SNIFF'",
+            # which names nothing the user can act on. Refuse here instead.
+            raise RuntimeError(
+                "The spoofing core needs the WinDivert bindings, and pydivert "
+                "is not installed. Reinstall it with: "
+                "pip install -r requirements.txt   (pydivert needs Python 3.10 "
+                "or newer, so check `python --version` if that fails.)")
         self._profile = profile
         self._strategy_override = str(forced_strategy or "wrong_seq").strip().lower()
         self._quality = Quality.from_tuning(tuning)
